@@ -335,6 +335,243 @@ def build_ensemble_recommendation(
     return sorted(selected), blue_pick
 
 
+def get_number_counts(df_num: pd.DataFrame, numbers: Iterable[int], cols: List[str]) -> Dict[int, int]:
+    # 统计号码出现次数
+    values = pd.to_numeric(df_num[cols].stack(), errors="coerce").dropna().astype(int)
+    counts = values.value_counts().to_dict()
+    return {n: counts.get(n, 0) for n in numbers}
+
+
+def bucket_index(num: int) -> int:
+    # 将号码映射到三个区间
+    if num <= 11:
+        return 0
+    if num <= 22:
+        return 1
+    return 2
+
+
+def count_buckets(nums: Iterable[int]) -> List[int]:
+    # 统计区间分布
+    counts = [0, 0, 0]
+    for n in nums:
+        counts[bucket_index(int(n))] += 1
+    return counts
+
+
+def compute_bucket_target(df_num: pd.DataFrame) -> List[int]:
+    # 计算区间目标分布并校正为 6 个号码
+    red_vals = df_num[RED_COLS].astype(int)
+    bucket_counts: List[List[int]] = []
+    for row in red_vals.itertuples(index=False):
+        bucket_counts.append(count_buckets(row))
+    if not bucket_counts:
+        return [2, 2, 2]
+    mean_counts = np.mean(bucket_counts, axis=0)
+    target = [int(round(val)) for val in mean_counts]
+    while sum(target) > 6:
+        idx = target.index(max(target))
+        target[idx] -= 1
+    while sum(target) < 6:
+        idx = target.index(min(target))
+        target[idx] += 1
+    return target
+
+
+def compute_red_stats(df_num: pd.DataFrame) -> Dict[str, float | List[int]]:
+    # 统计红球结构特征
+    red_vals = df_num[RED_COLS].astype(int)
+    sum_series = red_vals.sum(axis=1)
+    span_series = red_vals.max(axis=1) - red_vals.min(axis=1)
+    odd_series = (red_vals % 2 == 1).sum(axis=1)
+    return {
+        "sum_mean": float(sum_series.mean()),
+        "sum_std": float(sum_series.std(ddof=0) or 1.0),
+        "span_mean": float(span_series.mean()),
+        "span_std": float(span_series.std(ddof=0) or 1.0),
+        "odd_mean": float(odd_series.mean()),
+        "bucket_target": compute_bucket_target(df_num),
+    }
+
+
+def sample_red_numbers(rng: random.Random, weights: Dict[int, float] | None = None) -> List[int]:
+    # 根据权重抽取红球
+    if weights:
+        numbers = list(weights.keys())
+        w = [weights[n] for n in numbers]
+        return sorted(weighted_sample_without_replacement(numbers, w, 6, rng))
+    return sorted(rng.sample(range(1, 34), 6))
+
+
+def score_candidate_set(
+    nums: List[int],
+    target_sum: float,
+    target_span: float,
+    target_odd: float,
+    bucket_target: List[int],
+    sum_scale: float,
+    span_scale: float,
+) -> float:
+    # 候选组合评分（越小越好）
+    nums_sorted = sorted(nums)
+    sum_val = sum(nums_sorted)
+    span_val = nums_sorted[-1] - nums_sorted[0]
+    odd_count = sum(1 for n in nums_sorted if n % 2 == 1)
+    bucket_counts = count_buckets(nums_sorted)
+    consecutive = sum(1 for i in range(5) if nums_sorted[i + 1] - nums_sorted[i] == 1)
+
+    sum_score = abs(sum_val - target_sum) / max(1.0, sum_scale)
+    span_score = abs(span_val - target_span) / max(1.0, span_scale)
+    odd_score = abs(odd_count - target_odd)
+    bucket_score = sum(abs(bucket_counts[i] - bucket_target[i]) for i in range(3))
+    consecutive_score = max(0, consecutive - 1)
+
+    return sum_score + span_score + 0.6 * odd_score + 0.4 * bucket_score + 0.2 * consecutive_score
+
+
+def random_search_red_set(
+    rng: random.Random,
+    iterations: int,
+    target_sum: float,
+    target_span: float,
+    target_odd: float,
+    bucket_target: List[int],
+    sum_scale: float,
+    span_scale: float,
+    weights: Dict[int, float] | None = None,
+) -> List[int]:
+    # 随机搜索最优红球组合
+    best = sample_red_numbers(rng, weights)
+    best_score = score_candidate_set(best, target_sum, target_span, target_odd, bucket_target, sum_scale, span_scale)
+    for _ in range(iterations):
+        candidate = sample_red_numbers(rng, weights)
+        score = score_candidate_set(
+            candidate, target_sum, target_span, target_odd, bucket_target, sum_scale, span_scale
+        )
+        if score < best_score:
+            best = candidate
+            best_score = score
+    return best
+
+
+def pick_blue_by_target(target: float) -> int:
+    # 选择最接近目标值的蓝球
+    return min(range(1, 17), key=lambda n: abs(n - target))
+
+
+def compute_markov_scores(
+    df_num: pd.DataFrame, numbers: Iterable[int], cols: List[str]
+) -> Dict[int, float]:
+    # 计算一阶马尔可夫转移概率
+    draws = []
+    for row in df_num[cols].itertuples(index=False):
+        draws.append({int(v) for v in row if not pd.isna(v)})
+    if len(draws) < 2:
+        return {n: 0.0 for n in numbers}
+
+    draws = list(reversed(draws))
+    counts = {n: [[0, 0], [0, 0]] for n in numbers}
+    for idx in range(len(draws) - 1):
+        prev_set = draws[idx]
+        next_set = draws[idx + 1]
+        for n in numbers:
+            prev_state = 1 if n in prev_set else 0
+            next_state = 1 if n in next_set else 0
+            counts[n][prev_state][next_state] += 1
+
+    latest_set = draws[-1]
+    scores = {}
+    for n in numbers:
+        prev_state = 1 if n in latest_set else 0
+        stay = counts[n][prev_state][1] + 1
+        leave = counts[n][prev_state][0] + 1
+        scores[n] = stay / (stay + leave)
+    return scores
+
+
+def compute_pmi_matrix(df_num: pd.DataFrame, numbers: List[int], cols: List[str]) -> Dict[int, Dict[int, float]]:
+    # 计算号码互信息（PMI）
+    draws = []
+    for row in df_num[cols].itertuples(index=False):
+        draws.append(sorted({int(v) for v in row if not pd.isna(v)}))
+    total = max(1, len(draws))
+
+    count = {n: 0 for n in numbers}
+    co_counts: Dict[Tuple[int, int], int] = {}
+    for draw in draws:
+        for n in draw:
+            count[n] += 1
+        for i in range(len(draw)):
+            for j in range(i + 1, len(draw)):
+                pair = (draw[i], draw[j])
+                co_counts[pair] = co_counts.get(pair, 0) + 1
+
+    pmi = {n: {} for n in numbers}
+    for i in range(len(numbers)):
+        for j in range(i + 1, len(numbers)):
+            a, b = numbers[i], numbers[j]
+            p_a = (count[a] + 1) / (total + 2)
+            p_b = (count[b] + 1) / (total + 2)
+            p_ab = (co_counts.get((a, b), 0) + 1) / (total + 2)
+            value = math.log(p_ab / (p_a * p_b))
+            pmi[a][b] = value
+            pmi[b][a] = value
+    return pmi
+
+
+def pick_low_pmi_set(
+    pmi: Dict[int, Dict[int, float]], numbers: List[int], rng: random.Random
+) -> List[int]:
+    # 贪心选择低互信息组合
+    mean_pmi = {
+        n: float(np.mean([pmi[n][m] for m in numbers if m != n])) for n in numbers
+    }
+    start = min(mean_pmi, key=mean_pmi.get)
+    selected = [start]
+    bucket_counts = count_buckets(selected)
+
+    while len(selected) < 6:
+        best = None
+        best_score = float("inf")
+        for n in numbers:
+            if n in selected:
+                continue
+            bucket_idx = bucket_index(n)
+            if bucket_counts[bucket_idx] >= 3:
+                continue
+            score = float(np.mean([pmi[n][s] for s in selected]))
+            if score < best_score:
+                best_score = score
+                best = n
+        if best is None:
+            break
+        selected.append(best)
+        bucket_counts[bucket_index(best)] += 1
+
+    if len(selected) < 6:
+        remaining = [n for n in numbers if n not in selected]
+        rng.shuffle(remaining)
+        remaining.sort(key=lambda n: mean_pmi.get(n, 0.0))
+        for n in remaining:
+            if len(selected) == 6:
+                break
+            bucket_idx = bucket_index(n)
+            if bucket_counts[bucket_idx] >= 3:
+                continue
+            selected.append(n)
+            bucket_counts[bucket_idx] += 1
+
+    return sorted(selected)
+
+
+def poisson_score(k: int, lam: float) -> float:
+    # 泊松分布概率（对数形式转回）
+    if lam <= 0:
+        return 0.0
+    log_p = -lam + k * math.log(lam) - math.lgamma(k + 1)
+    return math.exp(log_p)
+
+
 def predict_method_entropy(df_num: pd.DataFrame, rng: random.Random) -> Tuple[List[int], int]:
     # 创意方法一：分段熵平衡（冷热反向权重）
     all_numbers = list(range(1, 34))
@@ -485,6 +722,204 @@ def predict_method_mirror(
     return sorted(chosen), blue_pick
 
 
+def predict_method_markov(df_num: pd.DataFrame, rng: random.Random) -> Tuple[List[int], int]:
+    # 方法七：马尔可夫转移
+    red_scores = compute_markov_scores(df_num, range(1, 34), RED_COLS)
+    buckets = [list(range(1, 12)), list(range(12, 23)), list(range(23, 34))]
+    reds = pick_top_by_bucket(red_scores, buckets, 2, rng)
+
+    blue_scores = compute_markov_scores(df_num, range(1, 17), [BLUE_COL])
+    blue_candidates = list(range(1, 17))
+    rng.shuffle(blue_candidates)
+    blue_candidates.sort(key=lambda n: blue_scores.get(n, 0.0), reverse=True)
+    return sorted(reds), blue_candidates[0]
+
+
+def predict_method_bayesian(df_num: pd.DataFrame, rng: random.Random) -> Tuple[List[int], int]:
+    # 方法八：贝叶斯更新
+    draws = len(df_num)
+    alpha, beta = 1.0, 1.0
+    red_counts = get_number_counts(df_num, range(1, 34), RED_COLS)
+    red_scores = {n: (alpha + red_counts[n]) / (alpha + beta + draws) for n in range(1, 34)}
+    buckets = [list(range(1, 12)), list(range(12, 23)), list(range(23, 34))]
+    reds = pick_top_by_bucket(red_scores, buckets, 2, rng)
+
+    blue_counts = get_number_counts(df_num, range(1, 17), [BLUE_COL])
+    blue_scores = {n: (alpha + blue_counts[n]) / (alpha + beta + draws) for n in range(1, 17)}
+    blue_candidates = list(range(1, 17))
+    rng.shuffle(blue_candidates)
+    blue_candidates.sort(key=lambda n: blue_scores.get(n, 0.0), reverse=True)
+    return sorted(reds), blue_candidates[0]
+
+
+def predict_method_multinomial_poisson(df_num: pd.DataFrame, rng: random.Random) -> Tuple[List[int], int]:
+    # 方法九：多项分布/泊松稳定度
+    draws = len(df_num)
+    red_counts = get_number_counts(df_num, range(1, 34), RED_COLS)
+    expected_red = draws * 6 / 33
+    red_scores = {n: poisson_score(red_counts[n], expected_red) for n in range(1, 34)}
+    buckets = [list(range(1, 12)), list(range(12, 23)), list(range(23, 34))]
+    reds = pick_top_by_bucket(red_scores, buckets, 2, rng)
+
+    blue_counts = get_number_counts(df_num, range(1, 17), [BLUE_COL])
+    expected_blue = draws / 16
+    blue_scores = {n: poisson_score(blue_counts[n], expected_blue) for n in range(1, 17)}
+    blue_candidates = list(range(1, 17))
+    rng.shuffle(blue_candidates)
+    blue_candidates.sort(key=lambda n: blue_scores.get(n, 0.0), reverse=True)
+    return sorted(reds), blue_candidates[0]
+
+
+def predict_method_time_series(
+    df_num: pd.DataFrame, red_stats: Dict[str, float | List[int]], rng: random.Random
+) -> Tuple[List[int], int]:
+    # 方法十：时间序列分解（趋势预测）
+    red_vals = df_num[RED_COLS].astype(int)
+    sum_series = red_vals.sum(axis=1).iloc[::-1].reset_index(drop=True)
+    window = min(30, len(sum_series))
+    trend = sum_series.rolling(window=window, min_periods=max(5, window // 2)).mean()
+    target_sum = float(trend.iloc[-1]) if not trend.empty else float(red_stats["sum_mean"])
+
+    reds = random_search_red_set(
+        rng=rng,
+        iterations=2000,
+        target_sum=target_sum,
+        target_span=float(red_stats["span_mean"]),
+        target_odd=float(red_stats["odd_mean"]),
+        bucket_target=red_stats["bucket_target"],
+        sum_scale=float(red_stats["sum_std"]),
+        span_scale=float(red_stats["span_std"]),
+    )
+
+    blue_series = df_num[BLUE_COL].astype(int).iloc[::-1].reset_index(drop=True)
+    blue_window = min(20, len(blue_series))
+    blue_trend = blue_series.rolling(window=blue_window, min_periods=max(3, blue_window // 2)).mean()
+    blue_target = float(blue_trend.iloc[-1]) if not blue_trend.empty else float(blue_series.mean())
+    blue_pick = pick_blue_by_target(blue_target)
+    return sorted(reds), blue_pick
+
+
+def predict_method_mutual_info(df_num: pd.DataFrame, rng: random.Random) -> Tuple[List[int], int]:
+    # 方法十一：互信息网络（弱相关组合）
+    numbers = list(range(1, 34))
+    pmi = compute_pmi_matrix(df_num, numbers, RED_COLS)
+    reds = pick_low_pmi_set(pmi, numbers, rng)
+
+    blue_counts = get_number_counts(df_num, range(1, 17), [BLUE_COL])
+    blue_candidates = list(range(1, 17))
+    rng.shuffle(blue_candidates)
+    blue_candidates.sort(key=lambda n: blue_counts.get(n, 0), reverse=True)
+    return sorted(reds), blue_candidates[0]
+
+
+def predict_method_combo_opt(
+    df_num: pd.DataFrame, red_stats: Dict[str, float | List[int]], rng: random.Random
+) -> Tuple[List[int], int]:
+    # 方法十二：组合优化（多目标约束）
+    reds = random_search_red_set(
+        rng=rng,
+        iterations=3000,
+        target_sum=float(red_stats["sum_mean"]),
+        target_span=float(red_stats["span_mean"]),
+        target_odd=float(red_stats["odd_mean"]),
+        bucket_target=red_stats["bucket_target"],
+        sum_scale=float(red_stats["sum_std"]),
+        span_scale=float(red_stats["span_std"]),
+    )
+    blue_mean = float(pd.to_numeric(df_num[BLUE_COL], errors="coerce").dropna().mean())
+    blue_pick = pick_blue_by_target(blue_mean)
+    return sorted(reds), blue_pick
+
+
+def predict_method_monte_carlo(df_num: pd.DataFrame, rng: random.Random) -> Tuple[List[int], int]:
+    # 方法十三：Bootstrap/Monte Carlo 模拟
+    numbers = list(range(1, 34))
+    blue_numbers = list(range(1, 17))
+    red_counts = get_number_counts(df_num, numbers, RED_COLS)
+    blue_counts = get_number_counts(df_num, blue_numbers, [BLUE_COL])
+
+    red_weights = [red_counts[n] + 1 for n in numbers]
+    blue_weights = [blue_counts[n] + 1 for n in blue_numbers]
+    sim_red = {n: 0 for n in numbers}
+    sim_blue = {n: 0 for n in blue_numbers}
+
+    for _ in range(2000):
+        reds = weighted_sample_without_replacement(numbers, red_weights, 6, rng)
+        for n in reds:
+            sim_red[n] += 1
+        blue = rng.choices(blue_numbers, weights=blue_weights, k=1)[0]
+        sim_blue[blue] += 1
+
+    buckets = [list(range(1, 12)), list(range(12, 23)), list(range(23, 34))]
+    reds = pick_top_by_bucket(sim_red, buckets, 2, rng)
+    blue_pick = max(sim_blue, key=sim_blue.get)
+    return sorted(reds), blue_pick
+
+
+def predict_method_volatility_reversion(
+    df_num: pd.DataFrame, red_stats: Dict[str, float | List[int]], rng: random.Random
+) -> Tuple[List[int], int]:
+    # 方法十四：波动回归（和值均值回归）
+    red_vals = df_num[RED_COLS].astype(int)
+    sum_series = red_vals.sum(axis=1).iloc[::-1].reset_index(drop=True)
+    mean_val = float(sum_series.mean())
+    std_val = float(sum_series.std(ddof=0) or 1.0)
+    last_sum = float(sum_series.iloc[-1]) if not sum_series.empty else mean_val
+    shift = 0.3 * std_val
+    target_sum = mean_val - shift if last_sum > mean_val else mean_val + shift
+
+    reds = random_search_red_set(
+        rng=rng,
+        iterations=2000,
+        target_sum=target_sum,
+        target_span=float(red_stats["span_mean"]),
+        target_odd=float(red_stats["odd_mean"]),
+        bucket_target=red_stats["bucket_target"],
+        sum_scale=float(red_stats["sum_std"]),
+        span_scale=float(red_stats["span_std"]),
+    )
+    blue_mean = float(pd.to_numeric(df_num[BLUE_COL], errors="coerce").dropna().mean())
+    blue_pick = pick_blue_by_target(blue_mean)
+    return sorted(reds), blue_pick
+
+
+def predict_method_phase_space(
+    df_num: pd.DataFrame, red_stats: Dict[str, float | List[int]], rng: random.Random
+) -> Tuple[List[int], int]:
+    # 方法十五：复杂系统相空间类比
+    red_vals = df_num[RED_COLS].astype(int)
+    sum_series = red_vals.sum(axis=1).iloc[::-1].reset_index(drop=True)
+    embed_dim = 3
+    target_sum = float(red_stats["sum_mean"])
+    if len(sum_series) >= embed_dim + 2:
+        target_vec = sum_series.iloc[-embed_dim:].to_numpy(dtype=float)
+        candidates: List[Tuple[float, float]] = []
+        for i in range(embed_dim - 1, len(sum_series) - 1):
+            vec = sum_series.iloc[i - embed_dim + 1 : i + 1].to_numpy(dtype=float)
+            dist = float(np.linalg.norm(vec - target_vec))
+            next_sum = float(sum_series.iloc[i + 1])
+            candidates.append((dist, next_sum))
+        candidates.sort(key=lambda x: x[0])
+        top = [c[1] for c in candidates[: min(8, len(candidates))]]
+        if top:
+            target_sum = float(np.median(top))
+
+    reds = random_search_red_set(
+        rng=rng,
+        iterations=2000,
+        target_sum=target_sum,
+        target_span=float(red_stats["span_mean"]),
+        target_odd=float(red_stats["odd_mean"]),
+        bucket_target=red_stats["bucket_target"],
+        sum_scale=float(red_stats["sum_std"]),
+        span_scale=float(red_stats["span_std"]),
+    )
+    blue_series = df_num[BLUE_COL].astype(int).iloc[::-1].reset_index(drop=True)
+    blue_target = float(blue_series.tail(10).mean()) if not blue_series.empty else 8.0
+    blue_pick = pick_blue_by_target(blue_target)
+    return sorted(reds), blue_pick
+
+
 def format_ticket(reds: List[int], blue: int) -> str:
     # 输出标准号码格式
     red_text = " ".join(f"{n:02d}" for n in reds)
@@ -560,6 +995,7 @@ def main() -> None:
     base_seed = latest_issue_seed + latest_date_seed
     recency_scores_red = compute_recency_scores(df_recent_num, range(1, 34), RED_COLS, half_life=60)
     recency_scores_blue = compute_recency_scores(df_recent_num, range(1, 17), [BLUE_COL], half_life=40)
+    red_stats = compute_red_stats(df_recent_num)
 
     metric_cols = st.columns(4)
     metric_cols[0].metric("最新期号", latest["issue"])
@@ -604,9 +1040,18 @@ def main() -> None:
         st.markdown("**数学创意预测（仅供娱乐）**")
         rng_entropy = random.Random(base_seed + 11)
         rng_gap = random.Random(base_seed + 23)
-        rng_hot = random.Random(base_seed + 37)
-        rng_cycle = random.Random(base_seed + 53)
-        rng_mirror = random.Random(base_seed + 71)
+        rng_markov = random.Random(base_seed + 31)
+        rng_bayes = random.Random(base_seed + 37)
+        rng_poisson = random.Random(base_seed + 41)
+        rng_time = random.Random(base_seed + 47)
+        rng_mi = random.Random(base_seed + 53)
+        rng_combo = random.Random(base_seed + 59)
+        rng_mc = random.Random(base_seed + 61)
+        rng_vol = random.Random(base_seed + 67)
+        rng_phase = random.Random(base_seed + 71)
+        rng_hot = random.Random(base_seed + 73)
+        rng_cycle = random.Random(base_seed + 79)
+        rng_mirror = random.Random(base_seed + 83)
         rng_reco = random.Random(base_seed + 97)
 
         method_results: List[Dict[str, object]] = []
@@ -641,37 +1086,127 @@ def main() -> None:
             }
         )
 
-        reds_d, blue_d = predict_method_recency_hot(
-            df_recent_num, recency_scores_red, recency_scores_blue, rng_hot
-        )
+        reds_d, blue_d = predict_method_markov(df_recent_num, rng_markov)
         method_results.append(
             {
-                "name": "方法四：指数记忆热度（近期高权重）",
-                "desc": "思路：对近期开奖给予更高权重，倾向选取近期活跃号码。",
+                "name": "方法四：马尔可夫转移（状态概率）",
+                "desc": "思路：基于上一期是否出现构造转移概率，估计下一期出现倾向。",
                 "reds": reds_d,
                 "blue": blue_d,
             }
         )
 
-        reds_e, blue_e = predict_method_cycle_reversion(df_recent_num, rng_cycle)
+        reds_e, blue_e = predict_method_bayesian(df_recent_num, rng_bayes)
         method_results.append(
             {
-                "name": "方法五：周期回归（间隔接近均值）",
-                "desc": "思路：选择当前间隔接近历史均值的号码，体现周期回归假设。",
+                "name": "方法五：贝叶斯更新（后验均值）",
+                "desc": "思路：以先验为基底，用出现频次更新后验概率。",
                 "reds": reds_e,
                 "blue": blue_e,
             }
         )
 
-        reds_f, blue_f = predict_method_mirror(
+        reds_f, blue_f = predict_method_multinomial_poisson(df_recent_num, rng_poisson)
+        method_results.append(
+            {
+                "name": "方法六：多项/泊松稳定度",
+                "desc": "思路：根据泊松模型评估出现次数与期望值的贴合度。",
+                "reds": reds_f,
+                "blue": blue_f,
+            }
+        )
+
+        reds_g, blue_g = predict_method_time_series(df_recent_num, red_stats, rng_time)
+        method_results.append(
+            {
+                "name": "方法七：时间序列趋势（和值预测）",
+                "desc": "思路：用滚动趋势估计下一期和值并匹配组合。",
+                "reds": reds_g,
+                "blue": blue_g,
+            }
+        )
+
+        reds_h, blue_h = predict_method_mutual_info(df_recent_num, rng_mi)
+        method_results.append(
+            {
+                "name": "方法八：互信息网络（弱关联）",
+                "desc": "思路：优先选择互信息较低的号码组合，降低相关性。",
+                "reds": reds_h,
+                "blue": blue_h,
+            }
+        )
+
+        reds_i, blue_i = predict_method_combo_opt(df_recent_num, red_stats, rng_combo)
+        method_results.append(
+            {
+                "name": "方法九：组合优化（多目标约束）",
+                "desc": "思路：同时约束和值、跨度、奇偶与区间分布，搜索最优组合。",
+                "reds": reds_i,
+                "blue": blue_i,
+            }
+        )
+
+        reds_j, blue_j = predict_method_monte_carlo(df_recent_num, rng_mc)
+        method_results.append(
+            {
+                "name": "方法十：Bootstrap/Monte Carlo 模拟",
+                "desc": "思路：用概率模型进行多次模拟，统计出现频率并择优。",
+                "reds": reds_j,
+                "blue": blue_j,
+            }
+        )
+
+        reds_k, blue_k = predict_method_volatility_reversion(df_recent_num, red_stats, rng_vol)
+        method_results.append(
+            {
+                "name": "方法十一：波动回归（和值均值回归）",
+                "desc": "思路：基于最近和值偏离程度进行均值回归预测。",
+                "reds": reds_k,
+                "blue": blue_k,
+            }
+        )
+
+        reds_l, blue_l = predict_method_phase_space(df_recent_num, red_stats, rng_phase)
+        method_results.append(
+            {
+                "name": "方法十二：复杂系统相空间类比",
+                "desc": "思路：以相空间相似序列的后续走势估计目标和值。",
+                "reds": reds_l,
+                "blue": blue_l,
+            }
+        )
+
+        reds_m, blue_m = predict_method_recency_hot(
+            df_recent_num, recency_scores_red, recency_scores_blue, rng_hot
+        )
+        method_results.append(
+            {
+                "name": "方法十三：指数记忆热度（近期高权重）",
+                "desc": "思路：对近期开奖给予更高权重，倾向选取近期活跃号码。",
+                "reds": reds_m,
+                "blue": blue_m,
+            }
+        )
+
+        reds_n, blue_n = predict_method_cycle_reversion(df_recent_num, rng_cycle)
+        method_results.append(
+            {
+                "name": "方法十四：周期回归（间隔接近均值）",
+                "desc": "思路：选择当前间隔接近历史均值的号码，体现周期回归假设。",
+                "reds": reds_n,
+                "blue": blue_n,
+            }
+        )
+
+        reds_o, blue_o = predict_method_mirror(
             df_recent_num, latest_num, recency_scores_red, rng_mirror
         )
         method_results.append(
             {
-                "name": "方法六：镜像映射（对称扰动）",
+                "name": "方法十五：镜像映射（对称扰动）",
                 "desc": "思路：对最近一期号码做中点对称映射，并用冷号轻微扰动补齐。",
-                "reds": reds_f,
-                "blue": blue_f,
+                "reds": reds_o,
+                "blue": blue_o,
             }
         )
 
