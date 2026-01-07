@@ -1,9 +1,10 @@
 # 双色球数据分析与趋势实验室
 
-本项目用于抓取双色球历史数据，生成 Excel，并在 Streamlit 界面中进行多维可视化分析与数学创意预测展示。
+本项目用于抓取双色球与福彩3D历史数据，生成 Excel，并在 Streamlit 界面中进行多维可视化分析与数学创意预测展示。
 
 ## 功能概览
 - 抓取双色球历史开奖数据并保存为 Excel
+- 抓取福彩3D历史开奖数据并保存为 Excel
 - 支持选择最近 100 期或自定义期数进行分析
 - 输出多种走势图（频次、走势、和值、跨度、奇偶结构等）
 - 提供多种数学创意预测方法，并给出综合推荐号码
@@ -30,6 +31,11 @@ python fetch_ssq_history.py
 python fetch_ssq_history.py --limit 5000 --output ssq_history.xlsx
 ```
 
+福彩3D 历史数据：
+```bash
+python fetch_sd_history.py --limit 5000 --output sd_history.xlsx
+```
+
 ### 2. 启动 Streamlit 界面
 ```bash
 streamlit run streamlit_app.py
@@ -38,18 +44,22 @@ streamlit run streamlit_app.py
 进入界面后可在侧边栏：
 - 下载/更新历史数据
 - 选择分析期数（最近 100 期或自定义）
+- 选择彩种（双色球 / 福彩3D）
 - 查看最新一期号码、走势图与预测结果
 
 ## 输出说明
 - `ssq_history.xlsx`：抓取后的历史数据文件
+- `sd_history.xlsx`：福彩3D历史数据文件
 - `plots/`：自动保存的走势图图片（JPG，300 DPI）
 
 ## 项目结构
 ```
 .
 ├── fetch_ssq_history.py     # 数据抓取与 Excel 生成
+├── fetch_sd_history.py      # 福彩3D 数据抓取与 Excel 生成
 ├── streamlit_app.py         # Streamlit 可视化界面
 ├── ssq_history.xlsx         # 历史数据（可重新生成）
+├── sd_history.xlsx          # 福彩3D 数据（可重新生成）
 ├── plots/                   # 输出图像目录（自动创建）
 ├── requirements.txt         # Python 依赖
 └── README.md                # 使用说明

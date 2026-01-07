@@ -20,6 +20,7 @@ ENV/
 
 plots/
 ssq_history.xlsx
+sd_history.xlsx
 *.log
 
 .DS_Store

@@ -20,12 +20,23 @@ except Exception as exc:  # pragma: no cover - Streamlit 下仅用于提示
 else:
     FETCH_IMPORT_ERROR = ""
 
+try:
+    from fetch_sd_history import fetch_sd_history
+except Exception as exc:  # pragma: no cover - Streamlit 下仅用于提示
+    fetch_sd_history = None
+    FETCH_SD_IMPORT_ERROR = str(exc)
+else:
+    FETCH_SD_IMPORT_ERROR = ""
+
 
 DATA_FILE_DEFAULT = "ssq_history.xlsx"
+SD_FILE_DEFAULT = "sd_history.xlsx"
 PLOT_DIR = Path("plots")
 RED_COLS = ["red_1", "red_2", "red_3", "red_4", "red_5", "red_6"]
 BLUE_COL = "blue"
 DATE_COL = "draw_date"
+SD_DIGIT_COLS = ["d1", "d2", "d3"]
+SD_SUM_COL = "sum"
 
 
 def normalize_numeric_str(series: pd.Series, width: int) -> pd.Series:
@@ -46,10 +57,30 @@ def load_data(file_path: str) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(show_spinner=False)
+def load_sd_data(file_path: str) -> pd.DataFrame:
+    # 读取福彩3D Excel 并做基础清洗
+    df = pd.read_excel(file_path, engine="openpyxl")
+    df["issue"] = normalize_numeric_str(df["issue"], 7)
+    for col in SD_DIGIT_COLS:
+        df[col] = normalize_numeric_str(df[col], 1)
+    df[SD_SUM_COL] = pd.to_numeric(df[SD_SUM_COL], errors="coerce")
+    df[DATE_COL] = pd.to_datetime(df[DATE_COL], errors="coerce")
+    return df
+
+
 def to_numeric_df(df: pd.DataFrame) -> pd.DataFrame:
     # 生成用于计算的数值 DataFrame
     df_num = df.copy()
     for col in RED_COLS + [BLUE_COL]:
+        df_num[col] = pd.to_numeric(df_num[col], errors="coerce")
+    return df_num
+
+
+def to_numeric_sd_df(df: pd.DataFrame) -> pd.DataFrame:
+    # 福彩3D 数值化 DataFrame
+    df_num = df.copy()
+    for col in SD_DIGIT_COLS + [SD_SUM_COL]:
         df_num[col] = pd.to_numeric(df_num[col], errors="coerce")
     return df_num
 
@@ -75,6 +106,15 @@ def render_ball_row(reds: Iterable[str], blue: str) -> None:
     red_html = " ".join([f"<span class='ball red'>{n}</span>" for n in reds])
     blue_html = f"<span class='ball blue'>{blue}</span>"
     st.markdown(f"<div class='ball-row'>{red_html} {blue_html}</div>", unsafe_allow_html=True)
+
+
+def render_sd_row(digits: Iterable[str], sum_value: int) -> None:
+    # 福彩3D 号码展示
+    digit_html = " ".join([f"<span class='ball orange'>{n}</span>" for n in digits])
+    st.markdown(
+        f"<div class='ball-row'>{digit_html}<span class='ball blue'>Sum {sum_value}</span></div>",
+        unsafe_allow_html=True,
+    )
 
 
 def plot_red_frequency(df_num: pd.DataFrame, tag: str) -> Path:
@@ -182,6 +222,80 @@ def plot_odd_even_trend(df_num: pd.DataFrame, tag: str) -> Path:
     ax.legend()
     ax.grid(axis="y", alpha=0.2)
     return save_and_show(fig, f"odd_even_trend_{tag}")
+
+
+def plot_sd_position_frequency(df_num: pd.DataFrame, tag: str) -> Path:
+    setup_plot_style()
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4), sharey=True)
+    position_titles = ["Hundreds", "Tens", "Ones"]
+    for idx, col in enumerate(SD_DIGIT_COLS):
+        counts = df_num[col].astype(int).value_counts().reindex(range(0, 10), fill_value=0)
+        axes[idx].bar(range(0, 10), counts.values, color="#f39c12")
+        axes[idx].set_title(f"{position_titles[idx]} Position Frequency")
+        axes[idx].set_xlabel("Digit")
+        axes[idx].set_xticks(range(0, 10))
+        axes[idx].grid(axis="y", alpha=0.3)
+    axes[0].set_ylabel("Count")
+    return save_and_show(fig, f"sd_position_frequency_{tag}")
+
+
+def plot_sd_overall_frequency(df_num: pd.DataFrame, tag: str) -> Path:
+    setup_plot_style()
+    values = pd.to_numeric(df_num[SD_DIGIT_COLS].stack(), errors="coerce").dropna().astype(int)
+    counts = values.value_counts().reindex(range(0, 10), fill_value=0)
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.bar(range(0, 10), counts.values, color="#2ecc71")
+    ax.set_title("Overall Digit Frequency")
+    ax.set_xlabel("Digit")
+    ax.set_ylabel("Count")
+    ax.set_xticks(range(0, 10))
+    ax.grid(axis="y", alpha=0.3)
+    return save_and_show(fig, f"sd_overall_frequency_{tag}")
+
+
+def plot_sd_sum_trend(df_num: pd.DataFrame, tag: str) -> Path:
+    setup_plot_style()
+    df_rev = df_num.iloc[::-1].reset_index(drop=True)
+    x = np.arange(len(df_rev))
+    sums = df_rev[SD_SUM_COL].astype(int)
+    fig, ax = plt.subplots(figsize=(12, 4))
+    ax.plot(x, sums, color="#8e44ad", linewidth=1.5)
+    ax.set_title("Sum Trend")
+    ax.set_xlabel("Draw Index (Oldest to Newest)")
+    ax.set_ylabel("Sum")
+    ax.grid(axis="y", alpha=0.2)
+    return save_and_show(fig, f"sd_sum_trend_{tag}")
+
+
+def plot_sd_sum_distribution(df_num: pd.DataFrame, tag: str) -> Path:
+    setup_plot_style()
+    sums = df_num[SD_SUM_COL].astype(int)
+    counts = sums.value_counts().reindex(range(0, 28), fill_value=0)
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.bar(range(0, 28), counts.values, color="#9b59b6")
+    ax.set_title("Sum Distribution")
+    ax.set_xlabel("Sum")
+    ax.set_ylabel("Count")
+    ax.set_xticks(range(0, 28, 2))
+    ax.grid(axis="y", alpha=0.3)
+    return save_and_show(fig, f"sd_sum_distribution_{tag}")
+
+
+def plot_sd_odd_even_trend(df_num: pd.DataFrame, tag: str) -> Path:
+    setup_plot_style()
+    df_rev = df_num.iloc[::-1].reset_index(drop=True)
+    x = np.arange(len(df_rev))
+    digits = df_rev[SD_DIGIT_COLS].astype(int)
+    odd_count = (digits % 2 == 1).sum(axis=1)
+    fig, ax = plt.subplots(figsize=(12, 4))
+    ax.plot(x, odd_count, color="#c0392b", label="Odd Count")
+    ax.plot(x, 3 - odd_count, color="#2980b9", label="Even Count")
+    ax.set_title("Odd vs Even Trend")
+    ax.set_xlabel("Draw Index (Oldest to Newest)")
+    ax.set_ylabel("Count")
+    ax.legend()
+    ax.grid(axis="y", alpha=0.2)
+    return save_and_show(fig, f"sd_odd_even_trend_{tag}")
 
 
 def weighted_sample_without_replacement(
@@ -572,6 +686,169 @@ def poisson_score(k: int, lam: float) -> float:
     return math.exp(log_p)
 
 
+def compute_sd_stats(df_num: pd.DataFrame) -> Dict[str, float]:
+    # 福彩3D 结构统计
+    digits = df_num[SD_DIGIT_COLS].astype(int)
+    sum_series = digits.sum(axis=1)
+    odd_series = (digits % 2 == 1).sum(axis=1)
+    big_series = (digits >= 5).sum(axis=1)
+    return {
+        "sum_mean": float(sum_series.mean()),
+        "sum_std": float(sum_series.std(ddof=0) or 1.0),
+        "odd_mean": float(odd_series.mean()),
+        "big_mean": float(big_series.mean()),
+    }
+
+
+def compute_sd_recency_scores(df_num: pd.DataFrame, half_life: float) -> Dict[str, Dict[int, float]]:
+    # 福彩3D 位置热度评分
+    scores: Dict[str, Dict[int, float]] = {}
+    decay = math.log(2) / max(1.0, half_life)
+    for col in SD_DIGIT_COLS:
+        pos_scores = {d: 0.0 for d in range(10)}
+        for idx, val in enumerate(df_num[col].dropna().astype(int)):
+            weight = math.exp(-decay * idx)
+            if val in pos_scores:
+                pos_scores[val] += weight
+        scores[col] = pos_scores
+    return scores
+
+
+def pick_digit_from_scores(scores: Dict[int, float], rng: random.Random) -> int:
+    # 选择得分最高的数字（含随机打散）
+    candidates = list(scores.keys())
+    rng.shuffle(candidates)
+    candidates.sort(key=lambda n: scores.get(n, 0.0), reverse=True)
+    return candidates[0]
+
+
+def sample_sd_digits(
+    rng: random.Random, weights_per_pos: Dict[str, Dict[int, float]] | None = None
+) -> List[int]:
+    # 按位置权重采样 3D 数字
+    digits: List[int] = []
+    for col in SD_DIGIT_COLS:
+        if weights_per_pos:
+            weights = weights_per_pos[col]
+            numbers = list(weights.keys())
+            w = [weights[n] for n in numbers]
+            digits.append(rng.choices(numbers, weights=w, k=1)[0])
+        else:
+            digits.append(rng.randint(0, 9))
+    return digits
+
+
+def score_sd_candidate(
+    digits: List[int],
+    target_sum: float,
+    target_odd: float,
+    target_big: float,
+    sum_scale: float,
+) -> float:
+    # 福彩3D 组合评分（越小越好）
+    sum_val = sum(digits)
+    odd_count = sum(1 for d in digits if d % 2 == 1)
+    big_count = sum(1 for d in digits if d >= 5)
+    repeat_penalty = 0.0
+    if len(set(digits)) == 1:
+        repeat_penalty = 0.8
+    elif len(set(digits)) == 2:
+        repeat_penalty = 0.3
+
+    sum_score = abs(sum_val - target_sum) / max(1.0, sum_scale)
+    odd_score = abs(odd_count - target_odd)
+    big_score = abs(big_count - target_big)
+    return sum_score + 0.6 * odd_score + 0.6 * big_score + repeat_penalty
+
+
+def random_search_sd(
+    rng: random.Random,
+    iterations: int,
+    target_sum: float,
+    target_odd: float,
+    target_big: float,
+    sum_scale: float,
+    weights_per_pos: Dict[str, Dict[int, float]] | None = None,
+) -> List[int]:
+    # 随机搜索最优 3D 组合
+    best = sample_sd_digits(rng, weights_per_pos)
+    best_score = score_sd_candidate(best, target_sum, target_odd, target_big, sum_scale)
+    for _ in range(iterations):
+        candidate = sample_sd_digits(rng, weights_per_pos)
+        score = score_sd_candidate(candidate, target_sum, target_odd, target_big, sum_scale)
+        if score < best_score:
+            best = candidate
+            best_score = score
+    return best
+
+
+def compute_digit_markov_scores(series: pd.Series) -> Dict[int, float]:
+    # 计算单位置数字马尔可夫转移
+    values = series.dropna().astype(int).iloc[::-1].reset_index(drop=True)
+    if len(values) < 2:
+        return {d: 0.0 for d in range(10)}
+
+    trans = {i: {j: 1 for j in range(10)} for i in range(10)}
+    for prev, nxt in zip(values[:-1], values[1:]):
+        trans[int(prev)][int(nxt)] += 1
+    last_digit = int(values.iloc[-1])
+    return {d: float(trans[last_digit][d]) for d in range(10)}
+
+
+def compute_digit_pmi_matrix(df_num: pd.DataFrame) -> Dict[int, Dict[int, float]]:
+    # 计算数字间互信息矩阵
+    total = max(1, len(df_num))
+    count = {d: 0 for d in range(10)}
+    co_counts: Dict[Tuple[int, int], int] = {}
+
+    for row in df_num[SD_DIGIT_COLS].itertuples(index=False):
+        digits = [int(v) for v in row if not pd.isna(v)]
+        for d in digits:
+            count[d] += 1
+        for i in range(len(digits)):
+            for j in range(i + 1, len(digits)):
+                a, b = digits[i], digits[j]
+                if a > b:
+                    a, b = b, a
+                co_counts[(a, b)] = co_counts.get((a, b), 0) + 1
+
+    pmi = {d: {} for d in range(10)}
+    for i in range(10):
+        for j in range(10):
+            if i == j:
+                pmi[i][j] = 0.0
+                continue
+            a, b = (i, j) if i < j else (j, i)
+            p_a = (count[i] + 1) / (total + 2)
+            p_b = (count[j] + 1) / (total + 2)
+            p_ab = (co_counts.get((a, b), 0) + 1) / (total + 2)
+            pmi[i][j] = math.log(p_ab / (p_a * p_b))
+    return pmi
+
+
+def build_sd_ensemble(
+    method_results: List[Dict[str, object]],
+    recency_scores: Dict[str, Dict[int, float]],
+    rng: random.Random,
+) -> List[int]:
+    # 福彩3D 综合投票
+    votes = {col: {d: 0 for d in range(10)} for col in SD_DIGIT_COLS}
+    for item in method_results:
+        digits = item["digits"]
+        for idx, col in enumerate(SD_DIGIT_COLS):
+            votes[col][int(digits[idx])] += 1
+
+    result: List[int] = []
+    for col in SD_DIGIT_COLS:
+        max_recency = max(recency_scores[col].values()) if recency_scores[col] else 1.0
+        scores = {
+            d: votes[col][d] + 0.1 * (recency_scores[col].get(d, 0.0) / max_recency)
+            for d in range(10)
+        }
+        result.append(pick_digit_from_scores(scores, rng))
+    return result
+
+
 def predict_method_entropy(df_num: pd.DataFrame, rng: random.Random) -> Tuple[List[int], int]:
     # 创意方法一：分段熵平衡（冷热反向权重）
     all_numbers = list(range(1, 34))
@@ -920,6 +1197,204 @@ def predict_method_phase_space(
     return sorted(reds), blue_pick
 
 
+def predict_sd_entropy(df_num: pd.DataFrame, rng: random.Random) -> List[int]:
+    # 3D 方法一：熵平衡（冷号权重）
+    weights_per_pos: Dict[str, Dict[int, float]] = {}
+    for col in SD_DIGIT_COLS:
+        counts = df_num[col].astype(int).value_counts().to_dict()
+        weights_per_pos[col] = {d: 1.0 / (counts.get(d, 0) + 1) for d in range(10)}
+    return sample_sd_digits(rng, weights_per_pos)
+
+
+def predict_sd_gap_wave(df_num: pd.DataFrame, rng: random.Random) -> List[int]:
+    # 3D 方法二：间隔波动（偏好中等空档）
+    weights_per_pos: Dict[str, Dict[int, float]] = {}
+    sigma = max(1.0, len(df_num) / 8.0)
+    for col in SD_DIGIT_COLS:
+        gaps = compute_gaps(df_num, range(10), [col])
+        gap_values = list(gaps.values())
+        median_gap = sorted(gap_values)[len(gap_values) // 2]
+        weights_per_pos[col] = {
+            d: math.exp(-((gaps[d] - median_gap) ** 2) / (2 * sigma**2)) for d in range(10)
+        }
+    return sample_sd_digits(rng, weights_per_pos)
+
+
+def predict_sd_markov(df_num: pd.DataFrame, rng: random.Random) -> List[int]:
+    # 3D 方法三：马尔可夫转移
+    digits: List[int] = []
+    for col in SD_DIGIT_COLS:
+        scores = compute_digit_markov_scores(df_num[col])
+        digits.append(pick_digit_from_scores(scores, rng))
+    return digits
+
+
+def predict_sd_bayesian(df_num: pd.DataFrame, rng: random.Random) -> List[int]:
+    # 3D 方法四：贝叶斯更新
+    digits: List[int] = []
+    total = len(df_num)
+    alpha = 1.0
+    for col in SD_DIGIT_COLS:
+        counts = df_num[col].astype(int).value_counts().to_dict()
+        scores = {d: (alpha + counts.get(d, 0)) / (alpha * 10 + total) for d in range(10)}
+        digits.append(pick_digit_from_scores(scores, rng))
+    return digits
+
+
+def predict_sd_poisson(df_num: pd.DataFrame, rng: random.Random) -> List[int]:
+    # 3D 方法五：多项/泊松稳定度
+    digits: List[int] = []
+    total = len(df_num)
+    expected = total / 10.0
+    for col in SD_DIGIT_COLS:
+        counts = df_num[col].astype(int).value_counts().to_dict()
+        scores = {d: poisson_score(counts.get(d, 0), expected) for d in range(10)}
+        digits.append(pick_digit_from_scores(scores, rng))
+    return digits
+
+
+def predict_sd_time_series(df_num: pd.DataFrame, stats: Dict[str, float], rng: random.Random) -> List[int]:
+    # 3D 方法六：时间序列趋势（和值预测）
+    sum_series = df_num[SD_SUM_COL].astype(int).iloc[::-1].reset_index(drop=True)
+    window = min(30, len(sum_series))
+    trend = sum_series.rolling(window=window, min_periods=max(5, window // 2)).mean()
+    target_sum = float(trend.iloc[-1]) if not trend.empty else stats["sum_mean"]
+    return random_search_sd(
+        rng=rng,
+        iterations=2000,
+        target_sum=target_sum,
+        target_odd=stats["odd_mean"],
+        target_big=stats["big_mean"],
+        sum_scale=stats["sum_std"],
+    )
+
+
+def predict_sd_mutual_info(df_num: pd.DataFrame, stats: Dict[str, float], rng: random.Random) -> List[int]:
+    # 3D 方法七：互信息网络（弱关联）
+    pmi = compute_digit_pmi_matrix(df_num)
+    target_sum = stats["sum_mean"]
+    sum_scale = stats["sum_std"]
+
+    best_digits = [0, 0, 0]
+    best_score = float("inf")
+    for d1 in range(10):
+        for d2 in range(10):
+            for d3 in range(10):
+                pmi_score = pmi[d1][d2] + pmi[d1][d3] + pmi[d2][d3]
+                sum_score = abs((d1 + d2 + d3) - target_sum) / max(1.0, sum_scale)
+                score = pmi_score + 0.2 * sum_score + rng.random() * 1e-6
+                if score < best_score:
+                    best_score = score
+                    best_digits = [d1, d2, d3]
+    return best_digits
+
+
+def predict_sd_combo_opt(df_num: pd.DataFrame, stats: Dict[str, float], rng: random.Random) -> List[int]:
+    # 3D 方法八：组合优化（多目标约束）
+    return random_search_sd(
+        rng=rng,
+        iterations=3000,
+        target_sum=stats["sum_mean"],
+        target_odd=stats["odd_mean"],
+        target_big=stats["big_mean"],
+        sum_scale=stats["sum_std"],
+    )
+
+
+def predict_sd_monte_carlo(df_num: pd.DataFrame, rng: random.Random) -> List[int]:
+    # 3D 方法九：Bootstrap/Monte Carlo 模拟
+    counts_per_pos = {
+        col: df_num[col].astype(int).value_counts().to_dict() for col in SD_DIGIT_COLS
+    }
+    sim_counts: Dict[Tuple[int, int, int], int] = {}
+    for _ in range(3000):
+        digits = []
+        for col in SD_DIGIT_COLS:
+            numbers = list(range(10))
+            weights = [counts_per_pos[col].get(n, 0) + 1 for n in numbers]
+            digits.append(rng.choices(numbers, weights=weights, k=1)[0])
+        key = (digits[0], digits[1], digits[2])
+        sim_counts[key] = sim_counts.get(key, 0) + 1
+    best = max(sim_counts, key=sim_counts.get)
+    return [int(best[0]), int(best[1]), int(best[2])]
+
+
+def predict_sd_volatility(df_num: pd.DataFrame, stats: Dict[str, float], rng: random.Random) -> List[int]:
+    # 3D 方法十：波动回归（和值均值回归）
+    sum_series = df_num[SD_SUM_COL].astype(int).iloc[::-1].reset_index(drop=True)
+    mean_val = float(sum_series.mean())
+    std_val = float(sum_series.std(ddof=0) or 1.0)
+    last_sum = float(sum_series.iloc[-1]) if not sum_series.empty else mean_val
+    target_sum = mean_val - 0.3 * std_val if last_sum > mean_val else mean_val + 0.3 * std_val
+    return random_search_sd(
+        rng=rng,
+        iterations=2000,
+        target_sum=target_sum,
+        target_odd=stats["odd_mean"],
+        target_big=stats["big_mean"],
+        sum_scale=stats["sum_std"],
+    )
+
+
+def predict_sd_phase_space(df_num: pd.DataFrame, stats: Dict[str, float], rng: random.Random) -> List[int]:
+    # 3D 方法十一：复杂系统相空间类比
+    sum_series = df_num[SD_SUM_COL].astype(int).iloc[::-1].reset_index(drop=True)
+    target_sum = stats["sum_mean"]
+    embed_dim = 3
+    if len(sum_series) >= embed_dim + 2:
+        target_vec = sum_series.iloc[-embed_dim:].to_numpy(dtype=float)
+        candidates: List[Tuple[float, float]] = []
+        for i in range(embed_dim - 1, len(sum_series) - 1):
+            vec = sum_series.iloc[i - embed_dim + 1 : i + 1].to_numpy(dtype=float)
+            dist = float(np.linalg.norm(vec - target_vec))
+            next_sum = float(sum_series.iloc[i + 1])
+            candidates.append((dist, next_sum))
+        candidates.sort(key=lambda x: x[0])
+        top = [c[1] for c in candidates[: min(8, len(candidates))]]
+        if top:
+            target_sum = float(np.median(top))
+    return random_search_sd(
+        rng=rng,
+        iterations=2000,
+        target_sum=target_sum,
+        target_odd=stats["odd_mean"],
+        target_big=stats["big_mean"],
+        sum_scale=stats["sum_std"],
+    )
+
+
+def predict_sd_recency_hot(
+    df_num: pd.DataFrame, recency_scores: Dict[str, Dict[int, float]], rng: random.Random
+) -> List[int]:
+    # 3D 方法十二：指数记忆热度（近期高权重）
+    digits: List[int] = []
+    for col in SD_DIGIT_COLS:
+        digits.append(pick_digit_from_scores(recency_scores[col], rng))
+    return digits
+
+
+def predict_sd_cycle_reversion(df_num: pd.DataFrame, rng: random.Random) -> List[int]:
+    # 3D 方法十三：周期回归（间隔接近均值）
+    digits: List[int] = []
+    for col in SD_DIGIT_COLS:
+        avg_gap, current_gap = compute_gap_stats(df_num, range(10), [col])
+        scores = {d: 1.0 / (abs(current_gap[d] - avg_gap[d]) + 1.0) for d in range(10)}
+        digits.append(pick_digit_from_scores(scores, rng))
+    return digits
+
+
+def predict_sd_mirror(df_num: pd.DataFrame) -> List[int]:
+    # 3D 方法十四：镜像映射（对称扰动）
+    latest = df_num.iloc[0]
+    digits = [9 - int(latest[col]) for col in SD_DIGIT_COLS]
+    return digits
+
+
+def format_sd_ticket(digits: List[int]) -> str:
+    # 输出 3D 格式号码
+    return " ".join(str(d) for d in digits)
+
+
 def format_ticket(reds: List[int], blue: int) -> str:
     # 输出标准号码格式
     red_text = " ".join(f"{n:02d}" for n in reds)
@@ -937,6 +1412,7 @@ def main() -> None:
         .ball { display: inline-block; padding: 6px 10px; border-radius: 999px; font-weight: 600; color: #fff; }
         .ball.red { background: #e74c3c; }
         .ball.blue { background: #3498db; }
+        .ball.orange { background: #f39c12; }
         div[data-testid="stMetric"] { background: #ffffff; padding: 12px 16px; border-radius: 10px; border: 1px solid #f0f0f0; }
         </style>
         """,
@@ -951,24 +1427,275 @@ def main() -> None:
 
     with st.sidebar:
         st.header("控制面板")
-        data_file = st.text_input("数据文件路径", value=DATA_FILE_DEFAULT)
-        data_path = Path(data_file)
+        lottery = st.selectbox("彩种", ["双色球", "福彩3D"], index=0)
 
-        st.subheader("历史数据下载")
-        limit = st.number_input("下载期数上限", min_value=100, max_value=10000, value=5000, step=100)
-        if st.button("下载/更新历史数据"):
-            if fetch_ssq_history is None:
-                st.error(f"无法调用抓取模块：{FETCH_IMPORT_ERROR}")
-            else:
-                with st.spinner("正在下载并保存..."):
-                    df_new = fetch_ssq_history(int(limit))
-                    df_new.to_excel(data_path, index=False, engine="openpyxl")
-                    st.cache_data.clear()
-                st.success(f"已保存：{data_path.resolve()}")
+        if lottery == "双色球":
+            data_file = st.text_input("数据文件路径", value=DATA_FILE_DEFAULT)
+            data_path = Path(data_file)
 
-        st.subheader("分析期数")
-        mode = st.radio("选择范围", ["最近100期", "自定义期数"], index=0)
-        custom_n = st.number_input("自定义期数", min_value=20, max_value=10000, value=300, step=10)
+            st.subheader("历史数据下载")
+            limit = st.number_input("下载期数上限", min_value=100, max_value=10000, value=5000, step=100)
+            if st.button("下载/更新历史数据"):
+                if fetch_ssq_history is None:
+                    st.error(f"无法调用抓取模块：{FETCH_IMPORT_ERROR}")
+                else:
+                    with st.spinner("正在下载并保存..."):
+                        df_new = fetch_ssq_history(int(limit))
+                        df_new.to_excel(data_path, index=False, engine="openpyxl")
+                        st.cache_data.clear()
+                    st.success(f"已保存：{data_path.resolve()}")
+
+            st.subheader("分析期数")
+            mode = st.radio("选择范围", ["最近100期", "自定义期数"], index=0)
+            custom_n = st.number_input("自定义期数", min_value=20, max_value=10000, value=300, step=10)
+        else:
+            data_file = st.text_input("数据文件路径", value=SD_FILE_DEFAULT)
+            data_path = Path(data_file)
+
+            st.subheader("历史数据下载")
+            limit = st.number_input("下载期数上限", min_value=100, max_value=10000, value=5000, step=100)
+            if st.button("下载/更新历史数据"):
+                if fetch_sd_history is None:
+                    st.error(f"无法调用抓取模块：{FETCH_SD_IMPORT_ERROR}")
+                else:
+                    with st.spinner("正在下载并保存..."):
+                        df_new = fetch_sd_history(int(limit))
+                        df_new.to_excel(data_path, index=False, engine="openpyxl")
+                        st.cache_data.clear()
+                    st.success(f"已保存：{data_path.resolve()}")
+
+            st.subheader("分析期数")
+            mode = st.radio("选择范围", ["最近100期", "自定义期数"], index=0)
+            custom_n = st.number_input("自定义期数", min_value=20, max_value=10000, value=300, step=10)
+
+    if lottery == "福彩3D":
+        if not data_path.exists():
+            st.warning("未找到数据文件，请先下载历史数据。")
+            return
+
+        df_sd = load_sd_data(str(data_path))
+        if df_sd.empty:
+            st.warning("数据为空，请检查 Excel 文件内容。")
+            return
+
+        df_sd = df_sd.sort_values("issue", ascending=False).reset_index(drop=True)
+        n_periods_sd = min(100, len(df_sd)) if mode == "最近100期" else min(int(custom_n), len(df_sd))
+
+        df_sd_recent = df_sd.head(n_periods_sd).copy()
+        df_sd_recent_num = to_numeric_sd_df(df_sd_recent)
+
+        latest_sd = df_sd.iloc[0]
+        digits_latest = [latest_sd[col] for col in SD_DIGIT_COLS]
+        sum_latest = int(pd.to_numeric(latest_sd[SD_SUM_COL], errors="coerce")) if pd.notna(
+            latest_sd[SD_SUM_COL]
+        ) else sum(int(d) for d in digits_latest)
+
+        latest_issue_seed = int(str(latest_sd["issue"]).lstrip("0") or "0")
+        latest_date_seed = (
+            int(latest_sd[DATE_COL].strftime("%Y%m%d")) if pd.notna(latest_sd[DATE_COL]) else 0
+        )
+        base_seed = latest_issue_seed + latest_date_seed
+        sd_stats = compute_sd_stats(df_sd_recent_num)
+        sd_recency_scores = compute_sd_recency_scores(df_sd_recent_num, half_life=60)
+
+        metric_cols = st.columns(4)
+        metric_cols[0].metric("最新期号", latest_sd["issue"])
+        metric_cols[1].metric(
+            "最新日期", latest_sd[DATE_COL].strftime("%Y-%m-%d") if pd.notna(latest_sd[DATE_COL]) else "N/A"
+        )
+        metric_cols[2].metric("总期数", len(df_sd))
+        metric_cols[3].metric("当前分析期数", n_periods_sd)
+
+        st.subheader("最新一期号码")
+        render_sd_row(digits_latest, sum_latest)
+
+        tab_freq, tab_trend, tab_predict, tab_data = st.tabs(
+            ["频次分布", "趋势分析", "创意预测", "原始数据"]
+        )
+
+        with tab_freq:
+            st.markdown("**位置与整体频次**")
+            tag = f"sd_freq_{n_periods_sd}"
+            path_pos = plot_sd_position_frequency(df_sd_recent_num, tag)
+            path_all = plot_sd_overall_frequency(df_sd_recent_num, tag)
+            st.caption(f"图片已保存：{path_pos}")
+            st.caption(f"图片已保存：{path_all}")
+
+        with tab_trend:
+            st.markdown("**和值与奇偶趋势**")
+            tag = f"sd_trend_{n_periods_sd}"
+            path_sum = plot_sd_sum_trend(df_sd_recent_num, tag)
+            path_dist = plot_sd_sum_distribution(df_sd_recent_num, tag)
+            path_oe = plot_sd_odd_even_trend(df_sd_recent_num, tag)
+            st.caption(f"图片已保存：{path_sum}")
+            st.caption(f"图片已保存：{path_dist}")
+            st.caption(f"图片已保存：{path_oe}")
+
+        with tab_predict:
+            st.markdown("**数学创意预测（仅供娱乐）**")
+            rng_entropy = random.Random(base_seed + 11)
+            rng_gap = random.Random(base_seed + 17)
+            rng_markov = random.Random(base_seed + 23)
+            rng_bayes = random.Random(base_seed + 29)
+            rng_poisson = random.Random(base_seed + 31)
+            rng_time = random.Random(base_seed + 37)
+            rng_mi = random.Random(base_seed + 41)
+            rng_combo = random.Random(base_seed + 43)
+            rng_mc = random.Random(base_seed + 47)
+            rng_vol = random.Random(base_seed + 53)
+            rng_phase = random.Random(base_seed + 59)
+            rng_hot = random.Random(base_seed + 61)
+            rng_cycle = random.Random(base_seed + 67)
+            rng_mirror = random.Random(base_seed + 71)
+            rng_reco = random.Random(base_seed + 79)
+
+            sd_results: List[Dict[str, object]] = []
+
+            digits_a = predict_sd_entropy(df_sd_recent_num, rng_entropy)
+            sd_results.append(
+                {
+                    "name": "方法一：熵平衡（冷号权重）",
+                    "desc": "思路：对低频数字赋予更高权重，进行位置抽样。",
+                    "digits": digits_a,
+                }
+            )
+
+            digits_b = predict_sd_gap_wave(df_sd_recent_num, rng_gap)
+            sd_results.append(
+                {
+                    "name": "方法二：间隔波动（中等空档）",
+                    "desc": "思路：偏好出现间隔接近中位数的数字。",
+                    "digits": digits_b,
+                }
+            )
+
+            digits_c = predict_sd_markov(df_sd_recent_num, rng_markov)
+            sd_results.append(
+                {
+                    "name": "方法三：马尔可夫转移（位置状态）",
+                    "desc": "思路：利用上一期数字的转移概率选择下一期。",
+                    "digits": digits_c,
+                }
+            )
+
+            digits_d = predict_sd_bayesian(df_sd_recent_num, rng_bayes)
+            sd_results.append(
+                {
+                    "name": "方法四：贝叶斯更新（后验均值）",
+                    "desc": "思路：用先验与频次更新得到位置后验。",
+                    "digits": digits_d,
+                }
+            )
+
+            digits_e = predict_sd_poisson(df_sd_recent_num, rng_poisson)
+            sd_results.append(
+                {
+                    "name": "方法五：多项/泊松稳定度",
+                    "desc": "思路：衡量频次与期望出现次数的贴合度。",
+                    "digits": digits_e,
+                }
+            )
+
+            digits_f = predict_sd_time_series(df_sd_recent_num, sd_stats, rng_time)
+            sd_results.append(
+                {
+                    "name": "方法六：时间序列趋势（和值预测）",
+                    "desc": "思路：以和值趋势为目标进行组合搜索。",
+                    "digits": digits_f,
+                }
+            )
+
+            digits_g = predict_sd_mutual_info(df_sd_recent_num, sd_stats, rng_mi)
+            sd_results.append(
+                {
+                    "name": "方法七：互信息网络（弱关联）",
+                    "desc": "思路：尽量选取互信息较低的数字组合。",
+                    "digits": digits_g,
+                }
+            )
+
+            digits_h = predict_sd_combo_opt(df_sd_recent_num, sd_stats, rng_combo)
+            sd_results.append(
+                {
+                    "name": "方法八：组合优化（多目标约束）",
+                    "desc": "思路：同时约束和值、奇偶与大小结构。",
+                    "digits": digits_h,
+                }
+            )
+
+            digits_i = predict_sd_monte_carlo(df_sd_recent_num, rng_mc)
+            sd_results.append(
+                {
+                    "name": "方法九：Bootstrap/Monte Carlo 模拟",
+                    "desc": "思路：概率模拟后选择出现频率最高组合。",
+                    "digits": digits_i,
+                }
+            )
+
+            digits_j = predict_sd_volatility(df_sd_recent_num, sd_stats, rng_vol)
+            sd_results.append(
+                {
+                    "name": "方法十：波动回归（和值均值回归）",
+                    "desc": "思路：依据近期和值偏离进行回归预测。",
+                    "digits": digits_j,
+                }
+            )
+
+            digits_k = predict_sd_phase_space(df_sd_recent_num, sd_stats, rng_phase)
+            sd_results.append(
+                {
+                    "name": "方法十一：复杂系统相空间类比",
+                    "desc": "思路：寻找相似和值轨迹并预测下一步。",
+                    "digits": digits_k,
+                }
+            )
+
+            digits_l = predict_sd_recency_hot(df_sd_recent_num, sd_recency_scores, rng_hot)
+            sd_results.append(
+                {
+                    "name": "方法十二：指数记忆热度（近期高权重）",
+                    "desc": "思路：强调近期出现频次较高的数字。",
+                    "digits": digits_l,
+                }
+            )
+
+            digits_m = predict_sd_cycle_reversion(df_sd_recent_num, rng_cycle)
+            sd_results.append(
+                {
+                    "name": "方法十三：周期回归（间隔接近均值）",
+                    "desc": "思路：选择间隔接近均值的数字。",
+                    "digits": digits_m,
+                }
+            )
+
+            digits_n = predict_sd_mirror(df_sd_recent_num)
+            sd_results.append(
+                {
+                    "name": "方法十四：镜像映射（对称扰动）",
+                    "desc": "思路：对最新数字做镜像映射。",
+                    "digits": digits_n,
+                }
+            )
+
+            sd_recommend = build_sd_ensemble(sd_results, sd_recency_scores, rng_reco)
+            sd_sum = sum(sd_recommend)
+
+            st.markdown("**综合推荐号码**")
+            render_sd_row([str(d) for d in sd_recommend], sd_sum)
+            st.code(format_sd_ticket(sd_recommend))
+            st.caption("综合规则：多方法投票 + 近期热度微调。")
+
+            for idx, item in enumerate(sd_results):
+                expanded = idx == 0
+                with st.expander(item["name"], expanded=expanded):
+                    st.write(item["desc"])
+                    st.code(format_sd_ticket(item["digits"]))
+
+        with tab_data:
+            st.markdown("**最近数据预览**")
+            st.dataframe(df_sd_recent, use_container_width=True, height=420)
+
+        return
 
     if not data_path.exists():
         st.warning("未找到数据文件，请先下载历史数据。")
