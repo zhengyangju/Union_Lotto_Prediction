@@ -14,7 +14,7 @@ import streamlit as st
 
 try:
     from fetch_ssq_history import fetch_ssq_history
-except Exception as exc:  # pragma: no cover - Streamlit 下仅用于提示
+except Exception as exc:  
     fetch_ssq_history = None
     FETCH_IMPORT_ERROR = str(exc)
 else:
@@ -22,7 +22,7 @@ else:
 
 try:
     from fetch_sd_history import fetch_sd_history
-except Exception as exc:  # pragma: no cover - Streamlit 下仅用于提示
+except Exception as exc:  # pragma: no cover - Streamlit下仅用于提示
     fetch_sd_history = None
     FETCH_SD_IMPORT_ERROR = str(exc)
 else:
