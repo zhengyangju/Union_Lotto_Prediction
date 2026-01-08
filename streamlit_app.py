@@ -28,15 +28,26 @@ except Exception as exc:  # pragma: no cover - Streamlit 下仅用于提示
 else:
     FETCH_SD_IMPORT_ERROR = ""
 
+try:
+    from fetch_dlt_history import fetch_dlt_history
+except Exception as exc:  # pragma: no cover - Streamlit 下仅用于提示
+    fetch_dlt_history = None
+    FETCH_DLT_IMPORT_ERROR = str(exc)
+else:
+    FETCH_DLT_IMPORT_ERROR = ""
+
 
 DATA_FILE_DEFAULT = "ssq_history.xlsx"
 SD_FILE_DEFAULT = "sd_history.xlsx"
+DLT_FILE_DEFAULT = "dlt_history.xlsx"
 PLOT_DIR = Path("plots")
 RED_COLS = ["red_1", "red_2", "red_3", "red_4", "red_5", "red_6"]
 BLUE_COL = "blue"
 DATE_COL = "draw_date"
 SD_DIGIT_COLS = ["d1", "d2", "d3"]
 SD_SUM_COL = "sum"
+DLT_FRONT_COLS = ["front_1", "front_2", "front_3", "front_4", "front_5"]
+DLT_BACK_COLS = ["back_1", "back_2"]
 
 
 def normalize_numeric_str(series: pd.Series, width: int) -> pd.Series:
@@ -69,6 +80,17 @@ def load_sd_data(file_path: str) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(show_spinner=False)
+def load_dlt_data(file_path: str) -> pd.DataFrame:
+    # 读取大乐透 Excel 并做基础清洗
+    df = pd.read_excel(file_path, engine="openpyxl")
+    df["issue"] = normalize_numeric_str(df["issue"], 5)
+    for col in DLT_FRONT_COLS + DLT_BACK_COLS:
+        df[col] = normalize_numeric_str(df[col], 2)
+    df[DATE_COL] = pd.to_datetime(df[DATE_COL], errors="coerce")
+    return df
+
+
 def to_numeric_df(df: pd.DataFrame) -> pd.DataFrame:
     # 生成用于计算的数值 DataFrame
     df_num = df.copy()
@@ -81,6 +103,14 @@ def to_numeric_sd_df(df: pd.DataFrame) -> pd.DataFrame:
     # 福彩3D 数值化 DataFrame
     df_num = df.copy()
     for col in SD_DIGIT_COLS + [SD_SUM_COL]:
+        df_num[col] = pd.to_numeric(df_num[col], errors="coerce")
+    return df_num
+
+
+def to_numeric_dlt_df(df: pd.DataFrame) -> pd.DataFrame:
+    # 大乐透数值化 DataFrame
+    df_num = df.copy()
+    for col in DLT_FRONT_COLS + DLT_BACK_COLS:
         df_num[col] = pd.to_numeric(df_num[col], errors="coerce")
     return df_num
 
@@ -106,6 +136,13 @@ def render_ball_row(reds: Iterable[str], blue: str) -> None:
     red_html = " ".join([f"<span class='ball red'>{n}</span>" for n in reds])
     blue_html = f"<span class='ball blue'>{blue}</span>"
     st.markdown(f"<div class='ball-row'>{red_html} {blue_html}</div>", unsafe_allow_html=True)
+
+
+def render_dlt_row(fronts: Iterable[str], backs: Iterable[str]) -> None:
+    # 大乐透号码展示
+    front_html = " ".join([f"<span class='ball red'>{n}</span>" for n in fronts])
+    back_html = " ".join([f"<span class='ball blue'>{n}</span>" for n in backs])
+    st.markdown(f"<div class='ball-row'>{front_html} {back_html}</div>", unsafe_allow_html=True)
 
 
 def render_sd_row(digits: Iterable[str], sum_value: int) -> None:
@@ -222,6 +259,113 @@ def plot_odd_even_trend(df_num: pd.DataFrame, tag: str) -> Path:
     ax.legend()
     ax.grid(axis="y", alpha=0.2)
     return save_and_show(fig, f"odd_even_trend_{tag}")
+
+
+def plot_dlt_front_frequency(df_num: pd.DataFrame, tag: str) -> Path:
+    setup_plot_style()
+    numbers = pd.to_numeric(df_num[DLT_FRONT_COLS].stack(), errors="coerce").dropna().astype(int)
+    counts = numbers.value_counts().reindex(range(1, 36), fill_value=0)
+    fig, ax = plt.subplots(figsize=(12, 4))
+    ax.bar(range(1, 36), counts.values, color="#e74c3c")
+    ax.set_title("Front Area Frequency")
+    ax.set_xlabel("Number")
+    ax.set_ylabel("Count")
+    ax.set_xticks(range(1, 36, 1))
+    ax.grid(axis="y", alpha=0.3)
+    return save_and_show(fig, f"dlt_front_frequency_{tag}")
+
+
+def plot_dlt_back_frequency(df_num: pd.DataFrame, tag: str) -> Path:
+    setup_plot_style()
+    numbers = pd.to_numeric(df_num[DLT_BACK_COLS].stack(), errors="coerce").dropna().astype(int)
+    counts = numbers.value_counts().reindex(range(1, 13), fill_value=0)
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.bar(range(1, 13), counts.values, color="#3498db")
+    ax.set_title("Back Area Frequency")
+    ax.set_xlabel("Number")
+    ax.set_ylabel("Count")
+    ax.set_xticks(range(1, 13, 1))
+    ax.grid(axis="y", alpha=0.3)
+    return save_and_show(fig, f"dlt_back_frequency_{tag}")
+
+
+def plot_dlt_front_trend(df_num: pd.DataFrame, tag: str) -> Path:
+    setup_plot_style()
+    df_rev = df_num.iloc[::-1].reset_index(drop=True)
+    x = np.repeat(np.arange(len(df_rev)), len(DLT_FRONT_COLS))
+    y = df_rev[DLT_FRONT_COLS].astype(int).to_numpy().flatten()
+    fig, ax = plt.subplots(figsize=(12, 4))
+    ax.scatter(x, y, s=10, alpha=0.6, color="#2c3e50")
+    ax.set_title("Front Area Trend")
+    ax.set_xlabel("Draw Index (Oldest to Newest)")
+    ax.set_ylabel("Number")
+    ax.set_yticks(range(1, 36, 2))
+    ax.grid(axis="y", alpha=0.2)
+    return save_and_show(fig, f"dlt_front_trend_{tag}")
+
+
+def plot_dlt_back_trend(df_num: pd.DataFrame, tag: str) -> Path:
+    setup_plot_style()
+    df_rev = df_num.iloc[::-1].reset_index(drop=True)
+    x = np.repeat(np.arange(len(df_rev)), len(DLT_BACK_COLS))
+    y = df_rev[DLT_BACK_COLS].astype(int).to_numpy().flatten()
+    fig, ax = plt.subplots(figsize=(12, 4))
+    ax.scatter(x, y, s=14, alpha=0.7, color="#1f77b4")
+    ax.set_title("Back Area Trend")
+    ax.set_xlabel("Draw Index (Oldest to Newest)")
+    ax.set_ylabel("Number")
+    ax.set_yticks(range(1, 13, 1))
+    ax.grid(axis="y", alpha=0.2)
+    return save_and_show(fig, f"dlt_back_trend_{tag}")
+
+
+def plot_dlt_sum_trend(df_num: pd.DataFrame, tag: str) -> Path:
+    setup_plot_style()
+    df_rev = df_num.iloc[::-1].reset_index(drop=True)
+    x = np.arange(len(df_rev))
+    front_sum = df_rev[DLT_FRONT_COLS].astype(int).sum(axis=1)
+    total_sum = front_sum + df_rev[DLT_BACK_COLS].astype(int).sum(axis=1)
+    fig, ax = plt.subplots(figsize=(12, 4))
+    ax.plot(x, front_sum, color="#e67e22", label="Front Sum")
+    ax.plot(x, total_sum, color="#16a085", label="Total Sum")
+    ax.set_title("Sum Trend")
+    ax.set_xlabel("Draw Index (Oldest to Newest)")
+    ax.set_ylabel("Sum")
+    ax.legend()
+    ax.grid(axis="y", alpha=0.2)
+    return save_and_show(fig, f"dlt_sum_trend_{tag}")
+
+
+def plot_dlt_span_trend(df_num: pd.DataFrame, tag: str) -> Path:
+    setup_plot_style()
+    df_rev = df_num.iloc[::-1].reset_index(drop=True)
+    x = np.arange(len(df_rev))
+    span = df_rev[DLT_FRONT_COLS].astype(int).max(axis=1) - df_rev[DLT_FRONT_COLS].astype(int).min(axis=1)
+    fig, ax = plt.subplots(figsize=(12, 4))
+    ax.plot(x, span, color="#8e44ad", linewidth=1.5)
+    ax.set_title("Front Area Span Trend")
+    ax.set_xlabel("Draw Index (Oldest to Newest)")
+    ax.set_ylabel("Span")
+    ax.grid(axis="y", alpha=0.2)
+    return save_and_show(fig, f"dlt_span_trend_{tag}")
+
+
+def plot_dlt_odd_even_trend(df_num: pd.DataFrame, tag: str) -> Path:
+    setup_plot_style()
+    df_rev = df_num.iloc[::-1].reset_index(drop=True)
+    x = np.arange(len(df_rev))
+    front_vals = df_rev[DLT_FRONT_COLS].astype(int)
+    odd_count = (front_vals % 2 == 1).sum(axis=1)
+    even_count = 5 - odd_count
+    fig, ax = plt.subplots(figsize=(12, 4))
+    ax.plot(x, odd_count, color="#c0392b", label="Odd Count")
+    ax.plot(x, even_count, color="#2980b9", label="Even Count")
+    ax.set_title("Odd vs Even Trend")
+    ax.set_xlabel("Draw Index (Oldest to Newest)")
+    ax.set_ylabel("Count")
+    ax.legend()
+    ax.grid(axis="y", alpha=0.2)
+    return save_and_show(fig, f"dlt_odd_even_trend_{tag}")
 
 
 def plot_sd_position_frequency(df_num: pd.DataFrame, tag: str) -> Path:
@@ -506,6 +650,261 @@ def compute_red_stats(df_num: pd.DataFrame) -> Dict[str, float | List[int]]:
         "odd_mean": float(odd_series.mean()),
         "bucket_target": compute_bucket_target(df_num),
     }
+
+
+def dlt_bucket_index(num: int) -> int:
+    # 大乐透前区号码映射到三个区间
+    if num <= 12:
+        return 0
+    if num <= 24:
+        return 1
+    return 2
+
+
+def dlt_count_buckets(nums: Iterable[int]) -> List[int]:
+    # 大乐透前区区间分布统计
+    counts = [0, 0, 0]
+    for n in nums:
+        counts[dlt_bucket_index(int(n))] += 1
+    return counts
+
+
+def compute_dlt_bucket_target(df_num: pd.DataFrame) -> List[int]:
+    # 计算大乐透前区目标区间分布并校正为 5 个号码
+    front_vals = df_num[DLT_FRONT_COLS].astype(int)
+    bucket_counts: List[List[int]] = []
+    for row in front_vals.itertuples(index=False):
+        bucket_counts.append(dlt_count_buckets(row))
+    if not bucket_counts:
+        return [2, 2, 1]
+    mean_counts = np.mean(bucket_counts, axis=0)
+    target = [int(round(val)) for val in mean_counts]
+    while sum(target) > 5:
+        idx = target.index(max(target))
+        target[idx] -= 1
+    while sum(target) < 5:
+        idx = target.index(min(target))
+        target[idx] += 1
+    return target
+
+
+def compute_dlt_front_stats(df_num: pd.DataFrame) -> Dict[str, float | List[int]]:
+    # 大乐透前区结构统计
+    front_vals = df_num[DLT_FRONT_COLS].astype(int)
+    sum_series = front_vals.sum(axis=1)
+    span_series = front_vals.max(axis=1) - front_vals.min(axis=1)
+    odd_series = (front_vals % 2 == 1).sum(axis=1)
+    return {
+        "sum_mean": float(sum_series.mean()),
+        "sum_std": float(sum_series.std(ddof=0) or 1.0),
+        "span_mean": float(span_series.mean()),
+        "span_std": float(span_series.std(ddof=0) or 1.0),
+        "odd_mean": float(odd_series.mean()),
+        "bucket_target": compute_dlt_bucket_target(df_num),
+    }
+
+
+def pick_top_by_bucket_target(
+    scores: Dict[int, float], buckets: List[List[int]], target_counts: List[int], rng: random.Random
+) -> List[int]:
+    # 按区间目标数量选取高分号码
+    selected: List[int] = []
+    for bucket, count in zip(buckets, target_counts):
+        candidates = bucket[:]
+        rng.shuffle(candidates)
+        candidates.sort(key=lambda n: scores.get(n, 0.0), reverse=True)
+        selected.extend(candidates[:count])
+    return selected
+
+
+def sample_dlt_front_numbers(rng: random.Random, weights: Dict[int, float] | None = None) -> List[int]:
+    # 根据权重抽取大乐透前区号码
+    if weights:
+        numbers = list(weights.keys())
+        w = [weights[n] for n in numbers]
+        return sorted(weighted_sample_without_replacement(numbers, w, 5, rng))
+    return sorted(rng.sample(range(1, 36), 5))
+
+
+def sample_dlt_back_numbers(rng: random.Random, weights: Dict[int, float] | None = None) -> List[int]:
+    # 根据权重抽取大乐透后区号码
+    numbers = list(range(1, 13))
+    if weights:
+        w = [weights[n] for n in numbers]
+        return sorted(weighted_sample_without_replacement(numbers, w, 2, rng))
+    return sorted(rng.sample(numbers, 2))
+
+
+def score_dlt_candidate_set(
+    nums: List[int],
+    target_sum: float,
+    target_span: float,
+    target_odd: float,
+    bucket_target: List[int],
+    sum_scale: float,
+    span_scale: float,
+) -> float:
+    # 大乐透前区候选组合评分（越小越好）
+    nums_sorted = sorted(nums)
+    sum_val = sum(nums_sorted)
+    span_val = nums_sorted[-1] - nums_sorted[0]
+    odd_count = sum(1 for n in nums_sorted if n % 2 == 1)
+    bucket_counts = dlt_count_buckets(nums_sorted)
+    consecutive = sum(
+        1 for i in range(len(nums_sorted) - 1) if nums_sorted[i + 1] - nums_sorted[i] == 1
+    )
+
+    sum_score = abs(sum_val - target_sum) / max(1.0, sum_scale)
+    span_score = abs(span_val - target_span) / max(1.0, span_scale)
+    odd_score = abs(odd_count - target_odd)
+    bucket_score = sum(abs(bucket_counts[i] - bucket_target[i]) for i in range(3))
+    consecutive_score = max(0, consecutive - 1)
+
+    return sum_score + span_score + 0.6 * odd_score + 0.4 * bucket_score + 0.2 * consecutive_score
+
+
+def random_search_dlt_front_set(
+    rng: random.Random,
+    iterations: int,
+    target_sum: float,
+    target_span: float,
+    target_odd: float,
+    bucket_target: List[int],
+    sum_scale: float,
+    span_scale: float,
+    weights: Dict[int, float] | None = None,
+) -> List[int]:
+    # 随机搜索最优大乐透前区组合
+    best = sample_dlt_front_numbers(rng, weights)
+    best_score = score_dlt_candidate_set(
+        best, target_sum, target_span, target_odd, bucket_target, sum_scale, span_scale
+    )
+    for _ in range(iterations):
+        candidate = sample_dlt_front_numbers(rng, weights)
+        score = score_dlt_candidate_set(
+            candidate, target_sum, target_span, target_odd, bucket_target, sum_scale, span_scale
+        )
+        if score < best_score:
+            best = candidate
+            best_score = score
+    return best
+
+
+def pick_low_pmi_set_dlt(
+    pmi: Dict[int, Dict[int, float]],
+    numbers: List[int],
+    bucket_target: List[int],
+    rng: random.Random,
+) -> List[int]:
+    # 贪心选择大乐透前区低互信息组合
+    mean_pmi = {n: float(np.mean([pmi[n][m] for m in numbers if m != n])) for n in numbers}
+    start = min(mean_pmi, key=mean_pmi.get)
+    selected = [start]
+    bucket_counts = dlt_count_buckets(selected)
+
+    while len(selected) < 5:
+        best = None
+        best_score = float("inf")
+        for n in numbers:
+            if n in selected:
+                continue
+            bucket_idx = dlt_bucket_index(n)
+            if bucket_counts[bucket_idx] >= bucket_target[bucket_idx]:
+                continue
+            score = float(np.mean([pmi[n][s] for s in selected]))
+            if score < best_score:
+                best_score = score
+                best = n
+        if best is None:
+            break
+        selected.append(best)
+        bucket_counts[dlt_bucket_index(best)] += 1
+
+    if len(selected) < 5:
+        remaining = [n for n in numbers if n not in selected]
+        rng.shuffle(remaining)
+        remaining.sort(key=lambda n: mean_pmi.get(n, 0.0))
+        for n in remaining:
+            if len(selected) == 5:
+                break
+            bucket_idx = dlt_bucket_index(n)
+            if bucket_counts[bucket_idx] >= bucket_target[bucket_idx]:
+                continue
+            selected.append(n)
+            bucket_counts[bucket_idx] += 1
+
+    return sorted(selected)
+
+
+def pick_dlt_back_pair_by_target(target_sum: float, rng: random.Random) -> List[int]:
+    # 选择和值接近目标的后区组合
+    pairs: List[Tuple[int, int]] = []
+    numbers = list(range(1, 13))
+    for i in range(len(numbers)):
+        for j in range(i + 1, len(numbers)):
+            pairs.append((numbers[i], numbers[j]))
+    best_diff = min(abs((a + b) - target_sum) for a, b in pairs)
+    candidates = [pair for pair in pairs if abs((pair[0] + pair[1]) - target_sum) == best_diff]
+    rng.shuffle(candidates)
+    return sorted(candidates[0])
+
+
+def build_dlt_ensemble(
+    method_results: List[Dict[str, object]],
+    recency_scores_front: Dict[int, float],
+    recency_scores_back: Dict[int, float],
+    bucket_target: List[int],
+    rng: random.Random,
+) -> Tuple[List[int], List[int]]:
+    # 大乐透综合投票 + 热度微调 + 分区约束
+    all_front = list(range(1, 36))
+    front_votes = {n: 0 for n in all_front}
+    for item in method_results:
+        fronts = item["fronts"]
+        for n in fronts:
+            front_votes[n] += 1
+
+    max_recency = max(recency_scores_front.values()) if recency_scores_front else 1.0
+    front_scores = {
+        n: front_votes[n] + 0.1 * (recency_scores_front.get(n, 0.0) / max_recency)
+        for n in all_front
+    }
+
+    buckets = [list(range(1, 13)), list(range(13, 25)), list(range(25, 36))]
+    selected = pick_top_by_bucket_target(front_scores, buckets, bucket_target, rng)
+    bucket_counts = dlt_count_buckets(selected)
+
+    ranked = all_front[:]
+    rng.shuffle(ranked)
+    ranked.sort(key=lambda n: front_scores.get(n, 0.0), reverse=True)
+    for n in ranked:
+        if len(selected) >= 5:
+            break
+        if n in selected:
+            continue
+        bucket_idx = dlt_bucket_index(n)
+        if bucket_counts[bucket_idx] >= bucket_target[bucket_idx]:
+            continue
+        selected.append(n)
+        bucket_counts[bucket_idx] += 1
+
+    back_votes = {n: 0 for n in range(1, 13)}
+    for item in method_results:
+        backs = item["backs"]
+        for n in backs:
+            back_votes[n] += 1
+
+    max_back_recency = max(recency_scores_back.values()) if recency_scores_back else 1.0
+    back_scores = {
+        n: back_votes[n] + 0.1 * (recency_scores_back.get(n, 0.0) / max_back_recency)
+        for n in range(1, 13)
+    }
+    back_candidates = list(range(1, 13))
+    rng.shuffle(back_candidates)
+    back_candidates.sort(key=lambda n: back_scores.get(n, 0.0), reverse=True)
+    back_pick = sorted(back_candidates[:2])
+
+    return sorted(selected), back_pick
 
 
 def sample_red_numbers(rng: random.Random, weights: Dict[int, float] | None = None) -> List[int]:
@@ -1197,6 +1596,399 @@ def predict_method_phase_space(
     return sorted(reds), blue_pick
 
 
+def predict_dlt_entropy(
+    df_num: pd.DataFrame, bucket_target: List[int], rng: random.Random
+) -> Tuple[List[int], List[int]]:
+    # 大乐透方法一：分段熵平衡（冷热反向权重）
+    all_numbers = list(range(1, 36))
+    freq = pd.to_numeric(df_num[DLT_FRONT_COLS].stack(), errors="coerce").dropna().astype(int)
+    freq_counts = freq.value_counts().to_dict()
+    weights = {n: 1.0 / (freq_counts.get(n, 0) + 1) for n in all_numbers}
+
+    buckets = [list(range(1, 13)), list(range(13, 25)), list(range(25, 36))]
+    chosen: List[int] = []
+    for bucket, count in zip(buckets, bucket_target):
+        bucket_weights = [weights[n] for n in bucket]
+        chosen.extend(weighted_sample_without_replacement(bucket, bucket_weights, count, rng))
+
+    back_freq = pd.to_numeric(df_num[DLT_BACK_COLS].stack(), errors="coerce").dropna().astype(int)
+    back_counts = back_freq.value_counts().to_dict()
+    back_weights = {n: 1.0 / (back_counts.get(n, 0) + 1) for n in range(1, 13)}
+    back_pick = sample_dlt_back_numbers(rng, back_weights)
+    return sorted(chosen), sorted(back_pick)
+
+
+def predict_dlt_gap_wave(df_num: pd.DataFrame, rng: random.Random) -> Tuple[List[int], List[int]]:
+    # 大乐透方法二：间隔波动（偏好中等空档）
+    numbers = list(range(1, 36))
+    gaps = compute_gaps(df_num, numbers, DLT_FRONT_COLS)
+    gap_values = list(gaps.values())
+    median_gap = sorted(gap_values)[len(gap_values) // 2]
+    sigma = max(1.0, len(df_num) / 6.0)
+    weights = []
+    for n in numbers:
+        score = math.exp(-((gaps[n] - median_gap) ** 2) / (2 * sigma**2))
+        weights.append(score)
+    chosen = weighted_sample_without_replacement(numbers, weights, 5, rng)
+
+    back_numbers = list(range(1, 13))
+    back_gaps = compute_gaps(df_num, back_numbers, DLT_BACK_COLS)
+    back_values = list(back_gaps.values())
+    back_median = sorted(back_values)[len(back_values) // 2]
+    back_sigma = max(1.0, len(df_num) / 6.0)
+    back_weights = [
+        math.exp(-((back_gaps[n] - back_median) ** 2) / (2 * back_sigma**2))
+        for n in back_numbers
+    ]
+    back_pick = weighted_sample_without_replacement(back_numbers, back_weights, 2, rng)
+    return sorted(chosen), sorted(back_pick)
+
+
+def predict_dlt_anti_cluster(df_num: pd.DataFrame, rng: random.Random) -> Tuple[List[int], List[int]]:
+    # 大乐透方法三：反聚类协同网络（弱相关组合）
+    size = 36
+    co = [[0 for _ in range(size)] for _ in range(size)]
+    for row in df_num[DLT_FRONT_COLS].itertuples(index=False):
+        nums = sorted({int(v) for v in row if not pd.isna(v)})
+        for i in range(len(nums)):
+            for j in range(i + 1, len(nums)):
+                co[nums[i]][nums[j]] += 1
+                co[nums[j]][nums[i]] += 1
+
+    strength = {n: sum(co[n]) for n in range(1, 36)}
+    selected = [max(strength, key=strength.get)]
+    while len(selected) < 5:
+        candidates = [n for n in range(1, 36) if n not in selected]
+        scores = {n: sum(co[n][s] for s in selected) for n in candidates}
+        best_score = min(scores.values())
+        best_candidates = [n for n, s in scores.items() if s == best_score]
+        rng.shuffle(best_candidates)
+        best_candidates.sort(key=lambda n: strength[n], reverse=True)
+        selected.append(best_candidates[0])
+
+    back_counts = get_number_counts(df_num, range(1, 13), DLT_BACK_COLS)
+    back_candidates = list(range(1, 13))
+    rng.shuffle(back_candidates)
+    back_candidates.sort(key=lambda n: back_counts.get(n, 0), reverse=True)
+    return sorted(selected), sorted(back_candidates[:2])
+
+
+def predict_dlt_recency_hot(
+    df_num: pd.DataFrame,
+    recency_scores_front: Dict[int, float],
+    recency_scores_back: Dict[int, float],
+    bucket_target: List[int],
+    rng: random.Random,
+) -> Tuple[List[int], List[int]]:
+    # 大乐透方法四：指数记忆热度（近期高权重）
+    buckets = [list(range(1, 13)), list(range(13, 25)), list(range(25, 36))]
+    chosen = pick_top_by_bucket_target(recency_scores_front, buckets, bucket_target, rng)
+
+    back_candidates = list(range(1, 13))
+    rng.shuffle(back_candidates)
+    back_candidates.sort(key=lambda n: recency_scores_back.get(n, 0.0), reverse=True)
+    return sorted(chosen), sorted(back_candidates[:2])
+
+
+def predict_dlt_cycle_reversion(
+    df_num: pd.DataFrame, bucket_target: List[int], rng: random.Random
+) -> Tuple[List[int], List[int]]:
+    # 大乐透方法五：周期回归（当前间隔接近历史均值）
+    numbers = list(range(1, 36))
+    avg_gap, current_gap = compute_gap_stats(df_num, numbers, DLT_FRONT_COLS)
+    scores = {n: 1.0 / (abs(current_gap[n] - avg_gap[n]) + 1.0) for n in numbers}
+
+    buckets = [list(range(1, 13)), list(range(13, 25)), list(range(25, 36))]
+    chosen = pick_top_by_bucket_target(scores, buckets, bucket_target, rng)
+
+    back_numbers = list(range(1, 13))
+    back_avg, back_current = compute_gap_stats(df_num, back_numbers, DLT_BACK_COLS)
+    back_scores = {n: 1.0 / (abs(back_current[n] - back_avg[n]) + 1.0) for n in back_numbers}
+    back_candidates = back_numbers[:]
+    rng.shuffle(back_candidates)
+    back_candidates.sort(key=lambda n: back_scores.get(n, 0.0), reverse=True)
+    return sorted(chosen), sorted(back_candidates[:2])
+
+
+def predict_dlt_mirror(
+    df_num: pd.DataFrame,
+    latest_row: pd.Series,
+    recency_scores_front: Dict[int, float],
+    recency_scores_back: Dict[int, float],
+    rng: random.Random,
+) -> Tuple[List[int], List[int]]:
+    # 大乐透方法六：镜像映射（围绕中点对称并做轻微扰动）
+    latest_fronts = [int(latest_row[col]) for col in DLT_FRONT_COLS]
+    mirrored = [36 - n for n in latest_fronts]
+    chosen: List[int] = []
+
+    for val in mirrored:
+        candidate = val
+        if candidate in chosen:
+            options = [candidate - 1, candidate + 1]
+            options = [o for o in options if 1 <= o <= 35 and o not in chosen]
+            if options:
+                options.sort(key=lambda n: recency_scores_front.get(n, 0.0))
+                candidate = options[0]
+            else:
+                candidate = None
+        if candidate is not None and candidate not in chosen:
+            chosen.append(candidate)
+
+    if len(chosen) < 5:
+        cold_numbers = list(range(1, 36))
+        rng.shuffle(cold_numbers)
+        cold_numbers.sort(key=lambda n: recency_scores_front.get(n, 0.0))
+        for n in cold_numbers:
+            if n not in chosen:
+                chosen.append(n)
+            if len(chosen) == 5:
+                break
+
+    latest_backs = [int(latest_row[col]) for col in DLT_BACK_COLS]
+    back_mirrored = [13 - n for n in latest_backs]
+    back_chosen: List[int] = []
+    for val in back_mirrored:
+        candidate = val
+        if candidate in back_chosen:
+            options = [candidate - 1, candidate + 1]
+            options = [o for o in options if 1 <= o <= 12 and o not in back_chosen]
+            if options:
+                options.sort(key=lambda n: recency_scores_back.get(n, 0.0))
+                candidate = options[0]
+            else:
+                candidate = None
+        if candidate is not None and candidate not in back_chosen:
+            back_chosen.append(candidate)
+
+    if len(back_chosen) < 2:
+        cold_back = list(range(1, 13))
+        rng.shuffle(cold_back)
+        cold_back.sort(key=lambda n: recency_scores_back.get(n, 0.0))
+        for n in cold_back:
+            if n not in back_chosen:
+                back_chosen.append(n)
+            if len(back_chosen) == 2:
+                break
+
+    return sorted(chosen), sorted(back_chosen)
+
+
+def predict_dlt_markov(
+    df_num: pd.DataFrame, bucket_target: List[int], rng: random.Random
+) -> Tuple[List[int], List[int]]:
+    # 大乐透方法七：马尔可夫转移
+    front_scores = compute_markov_scores(df_num, range(1, 36), DLT_FRONT_COLS)
+    buckets = [list(range(1, 13)), list(range(13, 25)), list(range(25, 36))]
+    fronts = pick_top_by_bucket_target(front_scores, buckets, bucket_target, rng)
+
+    back_scores = compute_markov_scores(df_num, range(1, 13), DLT_BACK_COLS)
+    back_candidates = list(range(1, 13))
+    rng.shuffle(back_candidates)
+    back_candidates.sort(key=lambda n: back_scores.get(n, 0.0), reverse=True)
+    return sorted(fronts), sorted(back_candidates[:2])
+
+
+def predict_dlt_bayesian(
+    df_num: pd.DataFrame, bucket_target: List[int], rng: random.Random
+) -> Tuple[List[int], List[int]]:
+    # 大乐透方法八：贝叶斯更新
+    draws = len(df_num)
+    alpha, beta = 1.0, 1.0
+    front_counts = get_number_counts(df_num, range(1, 36), DLT_FRONT_COLS)
+    front_scores = {
+        n: (alpha + front_counts[n]) / (alpha + beta + draws) for n in range(1, 36)
+    }
+    buckets = [list(range(1, 13)), list(range(13, 25)), list(range(25, 36))]
+    fronts = pick_top_by_bucket_target(front_scores, buckets, bucket_target, rng)
+
+    back_counts = get_number_counts(df_num, range(1, 13), DLT_BACK_COLS)
+    back_scores = {
+        n: (alpha + back_counts[n]) / (alpha + beta + draws) for n in range(1, 13)
+    }
+    back_candidates = list(range(1, 13))
+    rng.shuffle(back_candidates)
+    back_candidates.sort(key=lambda n: back_scores.get(n, 0.0), reverse=True)
+    return sorted(fronts), sorted(back_candidates[:2])
+
+
+def predict_dlt_multinomial_poisson(
+    df_num: pd.DataFrame, bucket_target: List[int], rng: random.Random
+) -> Tuple[List[int], List[int]]:
+    # 大乐透方法九：多项分布/泊松稳定度
+    draws = len(df_num)
+    front_counts = get_number_counts(df_num, range(1, 36), DLT_FRONT_COLS)
+    expected_front = draws * 5 / 35
+    front_scores = {n: poisson_score(front_counts[n], expected_front) for n in range(1, 36)}
+    buckets = [list(range(1, 13)), list(range(13, 25)), list(range(25, 36))]
+    fronts = pick_top_by_bucket_target(front_scores, buckets, bucket_target, rng)
+
+    back_counts = get_number_counts(df_num, range(1, 13), DLT_BACK_COLS)
+    expected_back = draws * 2 / 12
+    back_scores = {n: poisson_score(back_counts[n], expected_back) for n in range(1, 13)}
+    back_candidates = list(range(1, 13))
+    rng.shuffle(back_candidates)
+    back_candidates.sort(key=lambda n: back_scores.get(n, 0.0), reverse=True)
+    return sorted(fronts), sorted(back_candidates[:2])
+
+
+def predict_dlt_time_series(
+    df_num: pd.DataFrame, dlt_stats: Dict[str, float | List[int]], rng: random.Random
+) -> Tuple[List[int], List[int]]:
+    # 大乐透方法十：时间序列趋势（和值预测）
+    front_vals = df_num[DLT_FRONT_COLS].astype(int)
+    sum_series = front_vals.sum(axis=1).iloc[::-1].reset_index(drop=True)
+    window = min(30, len(sum_series))
+    trend = sum_series.rolling(window=window, min_periods=max(5, window // 2)).mean()
+    target_sum = float(trend.iloc[-1]) if not trend.empty else float(dlt_stats["sum_mean"])
+
+    fronts = random_search_dlt_front_set(
+        rng=rng,
+        iterations=2000,
+        target_sum=target_sum,
+        target_span=float(dlt_stats["span_mean"]),
+        target_odd=float(dlt_stats["odd_mean"]),
+        bucket_target=dlt_stats["bucket_target"],
+        sum_scale=float(dlt_stats["sum_std"]),
+        span_scale=float(dlt_stats["span_std"]),
+    )
+
+    back_sum_series = df_num[DLT_BACK_COLS].astype(int).sum(axis=1).iloc[::-1].reset_index(drop=True)
+    back_window = min(20, len(back_sum_series))
+    back_trend = back_sum_series.rolling(window=back_window, min_periods=max(3, back_window // 2)).mean()
+    back_target = float(back_trend.iloc[-1]) if not back_trend.empty else float(back_sum_series.mean())
+    back_pick = pick_dlt_back_pair_by_target(back_target, rng)
+    return sorted(fronts), sorted(back_pick)
+
+
+def predict_dlt_mutual_info(
+    df_num: pd.DataFrame, dlt_stats: Dict[str, float | List[int]], rng: random.Random
+) -> Tuple[List[int], List[int]]:
+    # 大乐透方法十一：互信息网络（弱相关组合）
+    numbers = list(range(1, 36))
+    pmi = compute_pmi_matrix(df_num, numbers, DLT_FRONT_COLS)
+    fronts = pick_low_pmi_set_dlt(pmi, numbers, dlt_stats["bucket_target"], rng)
+
+    back_counts = get_number_counts(df_num, range(1, 13), DLT_BACK_COLS)
+    back_candidates = list(range(1, 13))
+    rng.shuffle(back_candidates)
+    back_candidates.sort(key=lambda n: back_counts.get(n, 0), reverse=True)
+    return sorted(fronts), sorted(back_candidates[:2])
+
+
+def predict_dlt_combo_opt(
+    df_num: pd.DataFrame, dlt_stats: Dict[str, float | List[int]], rng: random.Random
+) -> Tuple[List[int], List[int]]:
+    # 大乐透方法十二：组合优化（多目标约束）
+    fronts = random_search_dlt_front_set(
+        rng=rng,
+        iterations=3000,
+        target_sum=float(dlt_stats["sum_mean"]),
+        target_span=float(dlt_stats["span_mean"]),
+        target_odd=float(dlt_stats["odd_mean"]),
+        bucket_target=dlt_stats["bucket_target"],
+        sum_scale=float(dlt_stats["sum_std"]),
+        span_scale=float(dlt_stats["span_std"]),
+    )
+    back_sum_mean = float(df_num[DLT_BACK_COLS].astype(int).sum(axis=1).mean())
+    back_pick = pick_dlt_back_pair_by_target(back_sum_mean, rng)
+    return sorted(fronts), sorted(back_pick)
+
+
+def predict_dlt_monte_carlo(
+    df_num: pd.DataFrame, dlt_stats: Dict[str, float | List[int]], rng: random.Random
+) -> Tuple[List[int], List[int]]:
+    # 大乐透方法十三：Bootstrap/Monte Carlo 模拟
+    numbers = list(range(1, 36))
+    back_numbers = list(range(1, 13))
+    front_counts = get_number_counts(df_num, numbers, DLT_FRONT_COLS)
+    back_counts = get_number_counts(df_num, back_numbers, DLT_BACK_COLS)
+
+    front_weights = [front_counts[n] + 1 for n in numbers]
+    back_weights = [back_counts[n] + 1 for n in back_numbers]
+    sim_front = {n: 0 for n in numbers}
+    sim_back = {n: 0 for n in back_numbers}
+
+    for _ in range(2000):
+        fronts = weighted_sample_without_replacement(numbers, front_weights, 5, rng)
+        for n in fronts:
+            sim_front[n] += 1
+        backs = weighted_sample_without_replacement(back_numbers, back_weights, 2, rng)
+        for n in backs:
+            sim_back[n] += 1
+
+    buckets = [list(range(1, 13)), list(range(13, 25)), list(range(25, 36))]
+    fronts = pick_top_by_bucket_target(sim_front, buckets, dlt_stats["bucket_target"], rng)
+    back_candidates = list(range(1, 13))
+    rng.shuffle(back_candidates)
+    back_candidates.sort(key=lambda n: sim_back.get(n, 0), reverse=True)
+    return sorted(fronts), sorted(back_candidates[:2])
+
+
+def predict_dlt_volatility_reversion(
+    df_num: pd.DataFrame, dlt_stats: Dict[str, float | List[int]], rng: random.Random
+) -> Tuple[List[int], List[int]]:
+    # 大乐透方法十四：波动回归（和值均值回归）
+    front_vals = df_num[DLT_FRONT_COLS].astype(int)
+    sum_series = front_vals.sum(axis=1).iloc[::-1].reset_index(drop=True)
+    mean_val = float(sum_series.mean())
+    std_val = float(sum_series.std(ddof=0) or 1.0)
+    last_sum = float(sum_series.iloc[-1]) if not sum_series.empty else mean_val
+    shift = 0.3 * std_val
+    target_sum = mean_val - shift if last_sum > mean_val else mean_val + shift
+
+    fronts = random_search_dlt_front_set(
+        rng=rng,
+        iterations=2000,
+        target_sum=target_sum,
+        target_span=float(dlt_stats["span_mean"]),
+        target_odd=float(dlt_stats["odd_mean"]),
+        bucket_target=dlt_stats["bucket_target"],
+        sum_scale=float(dlt_stats["sum_std"]),
+        span_scale=float(dlt_stats["span_std"]),
+    )
+    back_sum_mean = float(df_num[DLT_BACK_COLS].astype(int).sum(axis=1).mean())
+    back_pick = pick_dlt_back_pair_by_target(back_sum_mean, rng)
+    return sorted(fronts), sorted(back_pick)
+
+
+def predict_dlt_phase_space(
+    df_num: pd.DataFrame, dlt_stats: Dict[str, float | List[int]], rng: random.Random
+) -> Tuple[List[int], List[int]]:
+    # 大乐透方法十五：复杂系统相空间类比
+    front_vals = df_num[DLT_FRONT_COLS].astype(int)
+    sum_series = front_vals.sum(axis=1).iloc[::-1].reset_index(drop=True)
+    embed_dim = 3
+    target_sum = float(dlt_stats["sum_mean"])
+    if len(sum_series) >= embed_dim + 2:
+        target_vec = sum_series.iloc[-embed_dim:].to_numpy(dtype=float)
+        candidates: List[Tuple[float, float]] = []
+        for i in range(embed_dim - 1, len(sum_series) - 1):
+            vec = sum_series.iloc[i - embed_dim + 1 : i + 1].to_numpy(dtype=float)
+            dist = float(np.linalg.norm(vec - target_vec))
+            next_sum = float(sum_series.iloc[i + 1])
+            candidates.append((dist, next_sum))
+        candidates.sort(key=lambda x: x[0])
+        top = [c[1] for c in candidates[: min(8, len(candidates))]]
+        if top:
+            target_sum = float(np.median(top))
+
+    fronts = random_search_dlt_front_set(
+        rng=rng,
+        iterations=2000,
+        target_sum=target_sum,
+        target_span=float(dlt_stats["span_mean"]),
+        target_odd=float(dlt_stats["odd_mean"]),
+        bucket_target=dlt_stats["bucket_target"],
+        sum_scale=float(dlt_stats["sum_std"]),
+        span_scale=float(dlt_stats["span_std"]),
+    )
+    back_sum_series = df_num[DLT_BACK_COLS].astype(int).sum(axis=1).iloc[::-1].reset_index(drop=True)
+    back_target = float(back_sum_series.tail(10).mean()) if not back_sum_series.empty else 10.0
+    back_pick = pick_dlt_back_pair_by_target(back_target, rng)
+    return sorted(fronts), sorted(back_pick)
+
+
 def predict_sd_entropy(df_num: pd.DataFrame, rng: random.Random) -> List[int]:
     # 3D 方法一：熵平衡（冷号权重）
     weights_per_pos: Dict[str, Dict[int, float]] = {}
@@ -1395,6 +2187,13 @@ def format_sd_ticket(digits: List[int]) -> str:
     return " ".join(str(d) for d in digits)
 
 
+def format_dlt_ticket(fronts: List[int], backs: List[int]) -> str:
+    # 输出大乐透格式号码
+    front_text = " ".join(f"{n:02d}" for n in fronts)
+    back_text = " ".join(f"{n:02d}" for n in backs)
+    return f"{front_text} + {back_text}"
+
+
 def format_ticket(reds: List[int], blue: int) -> str:
     # 输出标准号码格式
     red_text = " ".join(f"{n:02d}" for n in reds)
@@ -1402,7 +2201,7 @@ def format_ticket(reds: List[int], blue: int) -> str:
 
 
 def main() -> None:
-    st.set_page_config(page_title="SSQ Visual Lab", layout="wide")
+    st.set_page_config(page_title="Lottery Visual Lab", layout="wide")
 
     st.markdown(
         """
@@ -1419,7 +2218,7 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    st.title("双色球数据分析与趋势实验室")
+    st.title("彩票数据分析与趋势实验室")
     st.caption("提示：预测结果仅供娱乐与数学实验展示，不构成任何投注建议。")
 
     now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1427,7 +2226,7 @@ def main() -> None:
 
     with st.sidebar:
         st.header("控制面板")
-        lottery = st.selectbox("彩种", ["双色球", "福彩3D"], index=0)
+        lottery = st.selectbox("彩种", ["双色球", "大乐透", "福彩3D"], index=0)
 
         if lottery == "双色球":
             data_file = st.text_input("数据文件路径", value=DATA_FILE_DEFAULT)
@@ -1441,6 +2240,25 @@ def main() -> None:
                 else:
                     with st.spinner("正在下载并保存..."):
                         df_new = fetch_ssq_history(int(limit))
+                        df_new.to_excel(data_path, index=False, engine="openpyxl")
+                        st.cache_data.clear()
+                    st.success(f"已保存：{data_path.resolve()}")
+
+            st.subheader("分析期数")
+            mode = st.radio("选择范围", ["最近100期", "自定义期数"], index=0)
+            custom_n = st.number_input("自定义期数", min_value=20, max_value=10000, value=300, step=10)
+        elif lottery == "大乐透":
+            data_file = st.text_input("数据文件路径", value=DLT_FILE_DEFAULT)
+            data_path = Path(data_file)
+
+            st.subheader("历史数据下载")
+            limit = st.number_input("下载期数上限", min_value=100, max_value=10000, value=5000, step=100)
+            if st.button("下载/更新历史数据"):
+                if fetch_dlt_history is None:
+                    st.error(f"无法调用抓取模块：{FETCH_DLT_IMPORT_ERROR}")
+                else:
+                    with st.spinner("正在下载并保存..."):
+                        df_new = fetch_dlt_history(int(limit))
                         df_new.to_excel(data_path, index=False, engine="openpyxl")
                         st.cache_data.clear()
                     st.success(f"已保存：{data_path.resolve()}")
@@ -1694,6 +2512,285 @@ def main() -> None:
         with tab_data:
             st.markdown("**最近数据预览**")
             st.dataframe(df_sd_recent, use_container_width=True, height=420)
+
+        return
+
+    if lottery == "大乐透":
+        if not data_path.exists():
+            st.warning("未找到数据文件，请先下载历史数据。")
+            return
+
+        df_dlt = load_dlt_data(str(data_path))
+        if df_dlt.empty:
+            st.warning("数据为空，请检查 Excel 文件内容。")
+            return
+
+        df_dlt = df_dlt.sort_values("issue", ascending=False).reset_index(drop=True)
+        n_periods_dlt = min(100, len(df_dlt)) if mode == "最近100期" else min(int(custom_n), len(df_dlt))
+
+        df_dlt_recent = df_dlt.head(n_periods_dlt).copy()
+        df_dlt_recent_num = to_numeric_dlt_df(df_dlt_recent)
+
+        latest_dlt = df_dlt.iloc[0]
+        front_latest = [latest_dlt[col] for col in DLT_FRONT_COLS]
+        back_latest = [latest_dlt[col] for col in DLT_BACK_COLS]
+
+        latest_issue_seed = int(str(latest_dlt["issue"]).lstrip("0") or "0")
+        latest_date_seed = (
+            int(latest_dlt[DATE_COL].strftime("%Y%m%d")) if pd.notna(latest_dlt[DATE_COL]) else 0
+        )
+        base_seed = latest_issue_seed + latest_date_seed
+        recency_scores_front = compute_recency_scores(
+            df_dlt_recent_num, range(1, 36), DLT_FRONT_COLS, half_life=60
+        )
+        recency_scores_back = compute_recency_scores(
+            df_dlt_recent_num, range(1, 13), DLT_BACK_COLS, half_life=40
+        )
+        dlt_stats = compute_dlt_front_stats(df_dlt_recent_num)
+
+        metric_cols = st.columns(4)
+        metric_cols[0].metric("最新期号", latest_dlt["issue"])
+        metric_cols[1].metric(
+            "最新日期",
+            latest_dlt[DATE_COL].strftime("%Y-%m-%d") if pd.notna(latest_dlt[DATE_COL]) else "N/A",
+        )
+        metric_cols[2].metric("总期数", len(df_dlt))
+        metric_cols[3].metric("当前分析期数", n_periods_dlt)
+
+        st.subheader("最新一期号码")
+        render_dlt_row(front_latest, back_latest)
+
+        tab_freq, tab_trend, tab_structure, tab_predict, tab_data = st.tabs(
+            ["频次分布", "号码走势", "结构趋势", "创意预测", "原始数据"]
+        )
+
+        with tab_freq:
+            st.markdown("**频次统计（前区与后区）**")
+            tag = f"dlt_freq_{n_periods_dlt}"
+            path_front = plot_dlt_front_frequency(df_dlt_recent_num, tag)
+            path_back = plot_dlt_back_frequency(df_dlt_recent_num, tag)
+            st.caption(f"图片已保存：{path_front}")
+            st.caption(f"图片已保存：{path_back}")
+
+        with tab_trend:
+            st.markdown("**走势散点与序列趋势**")
+            tag = f"dlt_trend_{n_periods_dlt}"
+            path_front = plot_dlt_front_trend(df_dlt_recent_num, tag)
+            path_back = plot_dlt_back_trend(df_dlt_recent_num, tag)
+            st.caption(f"图片已保存：{path_front}")
+            st.caption(f"图片已保存：{path_back}")
+
+        with tab_structure:
+            st.markdown("**和值、跨度与奇偶结构**")
+            tag = f"dlt_struct_{n_periods_dlt}"
+            path_sum = plot_dlt_sum_trend(df_dlt_recent_num, tag)
+            path_span = plot_dlt_span_trend(df_dlt_recent_num, tag)
+            path_oe = plot_dlt_odd_even_trend(df_dlt_recent_num, tag)
+            st.caption(f"图片已保存：{path_sum}")
+            st.caption(f"图片已保存：{path_span}")
+            st.caption(f"图片已保存：{path_oe}")
+
+        with tab_predict:
+            st.markdown("**数学创意预测（仅供娱乐）**")
+            rng_entropy = random.Random(base_seed + 11)
+            rng_gap = random.Random(base_seed + 23)
+            rng_cluster = random.Random(base_seed + 29)
+            rng_hot = random.Random(base_seed + 31)
+            rng_cycle = random.Random(base_seed + 37)
+            rng_mirror = random.Random(base_seed + 41)
+            rng_markov = random.Random(base_seed + 47)
+            rng_bayes = random.Random(base_seed + 53)
+            rng_poisson = random.Random(base_seed + 59)
+            rng_time = random.Random(base_seed + 61)
+            rng_mi = random.Random(base_seed + 67)
+            rng_combo = random.Random(base_seed + 71)
+            rng_mc = random.Random(base_seed + 73)
+            rng_vol = random.Random(base_seed + 79)
+            rng_phase = random.Random(base_seed + 83)
+            rng_reco = random.Random(base_seed + 97)
+
+            dlt_results: List[Dict[str, object]] = []
+
+            fronts_a, backs_a = predict_dlt_entropy(df_dlt_recent_num, dlt_stats["bucket_target"], rng_entropy)
+            dlt_results.append(
+                {
+                    "name": "方法一：分段熵平衡（冷热反向权重）",
+                    "desc": "思路：对低频号码赋予更高权重，并按区间抽样。",
+                    "fronts": fronts_a,
+                    "backs": backs_a,
+                }
+            )
+
+            fronts_b, backs_b = predict_dlt_gap_wave(df_dlt_recent_num, rng_gap)
+            dlt_results.append(
+                {
+                    "name": "方法二：间隔波动（偏好中等空档）",
+                    "desc": "思路：偏向出现间隔接近中位数的号码。",
+                    "fronts": fronts_b,
+                    "backs": backs_b,
+                }
+            )
+
+            fronts_c, backs_c = predict_dlt_anti_cluster(df_dlt_recent_num, rng_cluster)
+            dlt_results.append(
+                {
+                    "name": "方法三：反聚类协同网络（弱相关组合）",
+                    "desc": "思路：选择共现次数较少的号码组合。",
+                    "fronts": fronts_c,
+                    "backs": backs_c,
+                }
+            )
+
+            fronts_d, backs_d = predict_dlt_recency_hot(
+                df_dlt_recent_num, recency_scores_front, recency_scores_back, dlt_stats["bucket_target"], rng_hot
+            )
+            dlt_results.append(
+                {
+                    "name": "方法四：指数记忆热度（近期高权重）",
+                    "desc": "思路：强调近期出现频次较高的号码。",
+                    "fronts": fronts_d,
+                    "backs": backs_d,
+                }
+            )
+
+            fronts_e, backs_e = predict_dlt_cycle_reversion(
+                df_dlt_recent_num, dlt_stats["bucket_target"], rng_cycle
+            )
+            dlt_results.append(
+                {
+                    "name": "方法五：周期回归（间隔接近均值）",
+                    "desc": "思路：选择间隔接近历史均值的号码。",
+                    "fronts": fronts_e,
+                    "backs": backs_e,
+                }
+            )
+
+            fronts_f, backs_f = predict_dlt_mirror(
+                df_dlt_recent_num, latest_dlt, recency_scores_front, recency_scores_back, rng_mirror
+            )
+            dlt_results.append(
+                {
+                    "name": "方法六：镜像映射（对称扰动）",
+                    "desc": "思路：围绕中点对称映射并做轻微扰动。",
+                    "fronts": fronts_f,
+                    "backs": backs_f,
+                }
+            )
+
+            fronts_g, backs_g = predict_dlt_markov(
+                df_dlt_recent_num, dlt_stats["bucket_target"], rng_markov
+            )
+            dlt_results.append(
+                {
+                    "name": "方法七：马尔可夫转移（状态概率）",
+                    "desc": "思路：依据上一期状态估计下一期转移概率。",
+                    "fronts": fronts_g,
+                    "backs": backs_g,
+                }
+            )
+
+            fronts_h, backs_h = predict_dlt_bayesian(
+                df_dlt_recent_num, dlt_stats["bucket_target"], rng_bayes
+            )
+            dlt_results.append(
+                {
+                    "name": "方法八：贝叶斯更新（后验均值）",
+                    "desc": "思路：用先验与频次更新后验概率。",
+                    "fronts": fronts_h,
+                    "backs": backs_h,
+                }
+            )
+
+            fronts_i, backs_i = predict_dlt_multinomial_poisson(
+                df_dlt_recent_num, dlt_stats["bucket_target"], rng_poisson
+            )
+            dlt_results.append(
+                {
+                    "name": "方法九：多项/泊松稳定度",
+                    "desc": "思路：衡量频次与期望次数的贴合度。",
+                    "fronts": fronts_i,
+                    "backs": backs_i,
+                }
+            )
+
+            fronts_j, backs_j = predict_dlt_time_series(df_dlt_recent_num, dlt_stats, rng_time)
+            dlt_results.append(
+                {
+                    "name": "方法十：时间序列趋势（和值预测）",
+                    "desc": "思路：以和值趋势为目标进行组合搜索。",
+                    "fronts": fronts_j,
+                    "backs": backs_j,
+                }
+            )
+
+            fronts_k, backs_k = predict_dlt_mutual_info(df_dlt_recent_num, dlt_stats, rng_mi)
+            dlt_results.append(
+                {
+                    "name": "方法十一：互信息网络（弱关联）",
+                    "desc": "思路：尽量选取互信息较低的号码组合。",
+                    "fronts": fronts_k,
+                    "backs": backs_k,
+                }
+            )
+
+            fronts_l, backs_l = predict_dlt_combo_opt(df_dlt_recent_num, dlt_stats, rng_combo)
+            dlt_results.append(
+                {
+                    "name": "方法十二：组合优化（多目标约束）",
+                    "desc": "思路：同时约束和值、奇偶与区间结构。",
+                    "fronts": fronts_l,
+                    "backs": backs_l,
+                }
+            )
+
+            fronts_m, backs_m = predict_dlt_monte_carlo(df_dlt_recent_num, dlt_stats, rng_mc)
+            dlt_results.append(
+                {
+                    "name": "方法十三：Bootstrap/Monte Carlo 模拟",
+                    "desc": "思路：概率模拟后选择出现频率较高组合。",
+                    "fronts": fronts_m,
+                    "backs": backs_m,
+                }
+            )
+
+            fronts_n, backs_n = predict_dlt_volatility_reversion(df_dlt_recent_num, dlt_stats, rng_vol)
+            dlt_results.append(
+                {
+                    "name": "方法十四：波动回归（和值均值回归）",
+                    "desc": "思路：依据近期和值偏离进行回归预测。",
+                    "fronts": fronts_n,
+                    "backs": backs_n,
+                }
+            )
+
+            fronts_o, backs_o = predict_dlt_phase_space(df_dlt_recent_num, dlt_stats, rng_phase)
+            dlt_results.append(
+                {
+                    "name": "方法十五：复杂系统相空间类比",
+                    "desc": "思路：寻找相似和值轨迹并预测下一步。",
+                    "fronts": fronts_o,
+                    "backs": backs_o,
+                }
+            )
+
+            recommend_fronts, recommend_backs = build_dlt_ensemble(
+                dlt_results, recency_scores_front, recency_scores_back, dlt_stats["bucket_target"], rng_reco
+            )
+
+            st.markdown("**综合推荐号码**")
+            render_dlt_row([f"{n:02d}" for n in recommend_fronts], [f"{n:02d}" for n in recommend_backs])
+            st.code(format_dlt_ticket(recommend_fronts, recommend_backs))
+            st.caption("综合规则：多方法投票 + 近期热度微调 + 分区约束。")
+
+            for idx, item in enumerate(dlt_results):
+                expanded = idx == 0
+                with st.expander(item["name"], expanded=expanded):
+                    st.write(item["desc"])
+                    st.code(format_dlt_ticket(item["fronts"], item["backs"]))
+
+        with tab_data:
+            st.markdown("**最近数据预览**")
+            st.dataframe(df_dlt_recent, use_container_width=True, height=420)
 
         return
 
