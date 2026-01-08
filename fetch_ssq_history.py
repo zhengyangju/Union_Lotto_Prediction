@@ -13,7 +13,7 @@ DEFAULT_URL = "https://datachart.500star.com/ssq/history/newinc/history.php"
 
 
 def fetch_ssq_history(limit: int) -> pd.DataFrame:
-    # 使用 GBK 解码网页，避免数据表解析乱码
+    # 使用 GBK解码网页，避免数据表解析乱码
     response = requests.get(DEFAULT_URL, params={"limit": limit, "sort": "desc"}, timeout=30)
     response.encoding = "gbk"
 
