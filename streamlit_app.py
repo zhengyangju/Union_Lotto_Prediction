@@ -540,14 +540,16 @@ def build_ensemble_recommendation(
     recency_scores_red: Dict[int, float],
     recency_scores_blue: Dict[int, float],
     rng: random.Random,
+    method_weights: List[float] | None = None,
 ) -> Tuple[List[int], int]:
     # 综合投票 + 热度微调 + 分区约束
     all_reds = list(range(1, 34))
-    red_votes = {n: 0 for n in all_reds}
-    for item in method_results:
+    red_votes = {n: 0.0 for n in all_reds}
+    for idx, item in enumerate(method_results):
+        weight = method_weights[idx] if method_weights and idx < len(method_weights) else 1.0
         reds = item["reds"]
         for n in reds:
-            red_votes[n] += 1
+            red_votes[n] += weight
 
     max_recency = max(recency_scores_red.values()) if recency_scores_red else 1.0
     red_scores = {
@@ -578,10 +580,11 @@ def build_ensemble_recommendation(
         if len(selected) == 6:
             break
 
-    blue_votes = {n: 0 for n in range(1, 17)}
-    for item in method_results:
+    blue_votes = {n: 0.0 for n in range(1, 17)}
+    for idx, item in enumerate(method_results):
+        weight = method_weights[idx] if method_weights and idx < len(method_weights) else 1.0
         blue = int(item["blue"])
-        blue_votes[blue] += 1
+        blue_votes[blue] += weight
 
     max_blue_recency = max(recency_scores_blue.values()) if recency_scores_blue else 1.0
     blue_scores = {
@@ -855,14 +858,16 @@ def build_dlt_ensemble(
     recency_scores_back: Dict[int, float],
     bucket_target: List[int],
     rng: random.Random,
+    method_weights: List[float] | None = None,
 ) -> Tuple[List[int], List[int]]:
     # 大乐透综合投票 + 热度微调 + 分区约束
     all_front = list(range(1, 36))
-    front_votes = {n: 0 for n in all_front}
-    for item in method_results:
+    front_votes = {n: 0.0 for n in all_front}
+    for idx, item in enumerate(method_results):
+        weight = method_weights[idx] if method_weights and idx < len(method_weights) else 1.0
         fronts = item["fronts"]
         for n in fronts:
-            front_votes[n] += 1
+            front_votes[n] += weight
 
     max_recency = max(recency_scores_front.values()) if recency_scores_front else 1.0
     front_scores = {
@@ -888,11 +893,12 @@ def build_dlt_ensemble(
         selected.append(n)
         bucket_counts[bucket_idx] += 1
 
-    back_votes = {n: 0 for n in range(1, 13)}
-    for item in method_results:
+    back_votes = {n: 0.0 for n in range(1, 13)}
+    for idx, item in enumerate(method_results):
+        weight = method_weights[idx] if method_weights and idx < len(method_weights) else 1.0
         backs = item["backs"]
         for n in backs:
-            back_votes[n] += 1
+            back_votes[n] += weight
 
     max_back_recency = max(recency_scores_back.values()) if recency_scores_back else 1.0
     back_scores = {
@@ -905,6 +911,589 @@ def build_dlt_ensemble(
     back_pick = sorted(back_candidates[:2])
 
     return sorted(selected), back_pick
+
+
+def compute_ssq_method_weights(
+    method_results: List[Dict[str, object]],
+    actual_reds: Iterable[int],
+    actual_blue: int,
+    blue_factor: float = 0.6,
+    base_weight: float = 1.0,
+) -> List[float]:
+    # 根据上一期实际号码为各方法分配权重
+    actual_red_set = {int(n) for n in actual_reds}
+    actual_blue = int(actual_blue)
+    weights: List[float] = []
+    for item in method_results:
+        reds = {int(n) for n in item["reds"]}
+        blue = int(item["blue"])
+        red_hit = len(reds & actual_red_set)
+        blue_hit = 1 if blue == actual_blue else 0
+        score = red_hit + blue_factor * blue_hit
+        weights.append(base_weight + score)
+    return weights
+
+
+def compute_dlt_method_weights(
+    method_results: List[Dict[str, object]],
+    actual_fronts: Iterable[int],
+    actual_backs: Iterable[int],
+    back_factor: float = 0.6,
+    base_weight: float = 1.0,
+) -> List[float]:
+    # 根据上一期实际号码为大乐透方法分配权重
+    actual_front_set = {int(n) for n in actual_fronts}
+    actual_back_set = {int(n) for n in actual_backs}
+    weights: List[float] = []
+    for item in method_results:
+        fronts = {int(n) for n in item["fronts"]}
+        backs = {int(n) for n in item["backs"]}
+        front_hit = len(fronts & actual_front_set)
+        back_hit = len(backs & actual_back_set)
+        score = front_hit + back_factor * back_hit
+        weights.append(base_weight + score)
+    return weights
+
+
+def compute_sd_method_weights(
+    method_results: List[Dict[str, object]], actual_digits: Iterable[int], base_weight: float = 1.0
+) -> List[float]:
+    # 根据上一期实际号码为福彩3D方法分配权重
+    actual_list = [int(d) for d in actual_digits]
+    weights: List[float] = []
+    for item in method_results:
+        digits = [int(d) for d in item["digits"]]
+        hit = sum(1 for idx, val in enumerate(digits) if idx < len(actual_list) and val == actual_list[idx])
+        weights.append(base_weight + hit)
+    return weights
+
+
+def build_ssq_method_results(
+    df_recent_num: pd.DataFrame,
+    latest_row: pd.Series,
+    recency_scores_red: Dict[int, float],
+    recency_scores_blue: Dict[int, float],
+    red_stats: Dict[str, float | List[int]],
+    base_seed: int,
+) -> List[Dict[str, object]]:
+    # 生成双色球方法明细
+    rng_entropy = random.Random(base_seed + 11)
+    rng_gap = random.Random(base_seed + 23)
+    rng_markov = random.Random(base_seed + 31)
+    rng_bayes = random.Random(base_seed + 37)
+    rng_poisson = random.Random(base_seed + 41)
+    rng_time = random.Random(base_seed + 47)
+    rng_mi = random.Random(base_seed + 53)
+    rng_combo = random.Random(base_seed + 59)
+    rng_mc = random.Random(base_seed + 61)
+    rng_vol = random.Random(base_seed + 67)
+    rng_phase = random.Random(base_seed + 71)
+    rng_hot = random.Random(base_seed + 73)
+    rng_cycle = random.Random(base_seed + 79)
+    rng_mirror = random.Random(base_seed + 83)
+
+    method_results: List[Dict[str, object]] = []
+
+    reds_a, blue_a = predict_method_entropy(df_recent_num, rng_entropy)
+    method_results.append(
+        {
+            "name": "方法一：分段熵平衡（冷热反向权重）",
+            "desc": "思路：把红球分为三个区间，各区间以冷号为主进行无放回抽样，形成分布更均匀的组合。",
+            "reds": reds_a,
+            "blue": blue_a,
+        }
+    )
+
+    reds_b, blue_b = predict_method_gap_wave(df_recent_num, rng_gap)
+    method_results.append(
+        {
+            "name": "方法二：间隔波动（偏好中等空档）",
+            "desc": "思路：计算号码最近出现间隔，偏向选择空档处于中位数附近的号码。",
+            "reds": reds_b,
+            "blue": blue_b,
+        }
+    )
+
+    reds_c, blue_c = predict_method_anti_cluster(df_recent_num)
+    method_results.append(
+        {
+            "name": "方法三：反聚类协同网络（弱相关组合）",
+            "desc": "思路：基于共现矩阵选取相互共现次数较少的号码，强调组合多样性。",
+            "reds": reds_c,
+            "blue": blue_c,
+        }
+    )
+
+    reds_d, blue_d = predict_method_markov(df_recent_num, rng_markov)
+    method_results.append(
+        {
+            "name": "方法四：马尔可夫转移（状态概率）",
+            "desc": "思路：基于上一期是否出现构造转移概率，估计下一期出现倾向。",
+            "reds": reds_d,
+            "blue": blue_d,
+        }
+    )
+
+    reds_e, blue_e = predict_method_bayesian(df_recent_num, rng_bayes)
+    method_results.append(
+        {
+            "name": "方法五：贝叶斯更新（后验均值）",
+            "desc": "思路：以先验为基底，用出现频次更新后验概率。",
+            "reds": reds_e,
+            "blue": blue_e,
+        }
+    )
+
+    reds_f, blue_f = predict_method_multinomial_poisson(df_recent_num, rng_poisson)
+    method_results.append(
+        {
+            "name": "方法六：多项/泊松稳定度",
+            "desc": "思路：根据泊松模型评估出现次数与期望值的贴合度。",
+            "reds": reds_f,
+            "blue": blue_f,
+        }
+    )
+
+    reds_g, blue_g = predict_method_time_series(df_recent_num, red_stats, rng_time)
+    method_results.append(
+        {
+            "name": "方法七：时间序列趋势（和值预测）",
+            "desc": "思路：用滚动趋势估计下一期和值并匹配组合。",
+            "reds": reds_g,
+            "blue": blue_g,
+        }
+    )
+
+    reds_h, blue_h = predict_method_mutual_info(df_recent_num, rng_mi)
+    method_results.append(
+        {
+            "name": "方法八：互信息网络（弱关联）",
+            "desc": "思路：优先选择互信息较低的号码组合，降低相关性。",
+            "reds": reds_h,
+            "blue": blue_h,
+        }
+    )
+
+    reds_i, blue_i = predict_method_combo_opt(df_recent_num, red_stats, rng_combo)
+    method_results.append(
+        {
+            "name": "方法九：组合优化（多目标约束）",
+            "desc": "思路：同时约束和值、跨度、奇偶与区间分布，搜索最优组合。",
+            "reds": reds_i,
+            "blue": blue_i,
+        }
+    )
+
+    reds_j, blue_j = predict_method_monte_carlo(df_recent_num, rng_mc)
+    method_results.append(
+        {
+            "name": "方法十：Bootstrap/Monte Carlo 模拟",
+            "desc": "思路：用概率模型进行多次模拟，统计出现频率并择优。",
+            "reds": reds_j,
+            "blue": blue_j,
+        }
+    )
+
+    reds_k, blue_k = predict_method_volatility_reversion(df_recent_num, red_stats, rng_vol)
+    method_results.append(
+        {
+            "name": "方法十一：波动回归（和值均值回归）",
+            "desc": "思路：基于最近和值偏离程度进行均值回归预测。",
+            "reds": reds_k,
+            "blue": blue_k,
+        }
+    )
+
+    reds_l, blue_l = predict_method_phase_space(df_recent_num, red_stats, rng_phase)
+    method_results.append(
+        {
+            "name": "方法十二：复杂系统相空间类比",
+            "desc": "思路：以相空间相似序列的后续走势估计目标和值。",
+            "reds": reds_l,
+            "blue": blue_l,
+        }
+    )
+
+    reds_m, blue_m = predict_method_recency_hot(
+        df_recent_num, recency_scores_red, recency_scores_blue, rng_hot
+    )
+    method_results.append(
+        {
+            "name": "方法十三：指数记忆热度（近期高权重）",
+            "desc": "思路：对近期开奖给予更高权重，倾向选取近期活跃号码。",
+            "reds": reds_m,
+            "blue": blue_m,
+        }
+    )
+
+    reds_n, blue_n = predict_method_cycle_reversion(df_recent_num, rng_cycle)
+    method_results.append(
+        {
+            "name": "方法十四：周期回归（间隔接近均值）",
+            "desc": "思路：选择当前间隔接近历史均值的号码，体现周期回归假设。",
+            "reds": reds_n,
+            "blue": blue_n,
+        }
+    )
+
+    reds_o, blue_o = predict_method_mirror(
+        df_recent_num, latest_row, recency_scores_red, rng_mirror
+    )
+    method_results.append(
+        {
+            "name": "方法十五：镜像映射（对称扰动）",
+            "desc": "思路：对最近一期号码做中点对称映射，并用冷号轻微扰动补齐。",
+            "reds": reds_o,
+            "blue": blue_o,
+        }
+    )
+
+    return method_results
+
+
+def build_dlt_method_results(
+    df_recent_num: pd.DataFrame,
+    latest_row: pd.Series,
+    recency_scores_front: Dict[int, float],
+    recency_scores_back: Dict[int, float],
+    dlt_stats: Dict[str, float | List[int]],
+    base_seed: int,
+) -> List[Dict[str, object]]:
+    # 生成大乐透方法明细
+    rng_entropy = random.Random(base_seed + 11)
+    rng_gap = random.Random(base_seed + 23)
+    rng_cluster = random.Random(base_seed + 29)
+    rng_hot = random.Random(base_seed + 31)
+    rng_cycle = random.Random(base_seed + 37)
+    rng_mirror = random.Random(base_seed + 41)
+    rng_markov = random.Random(base_seed + 47)
+    rng_bayes = random.Random(base_seed + 53)
+    rng_poisson = random.Random(base_seed + 59)
+    rng_time = random.Random(base_seed + 61)
+    rng_mi = random.Random(base_seed + 67)
+    rng_combo = random.Random(base_seed + 71)
+    rng_mc = random.Random(base_seed + 73)
+    rng_vol = random.Random(base_seed + 79)
+    rng_phase = random.Random(base_seed + 83)
+
+    method_results: List[Dict[str, object]] = []
+
+    fronts_a, backs_a = predict_dlt_entropy(df_recent_num, dlt_stats["bucket_target"], rng_entropy)
+    method_results.append(
+        {
+            "name": "方法一：分段熵平衡（冷热反向权重）",
+            "desc": "思路：对低频号码赋予更高权重，并按区间抽样。",
+            "fronts": fronts_a,
+            "backs": backs_a,
+        }
+    )
+
+    fronts_b, backs_b = predict_dlt_gap_wave(df_recent_num, rng_gap)
+    method_results.append(
+        {
+            "name": "方法二：间隔波动（偏好中等空档）",
+            "desc": "思路：偏向出现间隔接近中位数的号码。",
+            "fronts": fronts_b,
+            "backs": backs_b,
+        }
+    )
+
+    fronts_c, backs_c = predict_dlt_anti_cluster(df_recent_num, rng_cluster)
+    method_results.append(
+        {
+            "name": "方法三：反聚类协同网络（弱相关组合）",
+            "desc": "思路：选择共现次数较少的号码组合。",
+            "fronts": fronts_c,
+            "backs": backs_c,
+        }
+    )
+
+    fronts_d, backs_d = predict_dlt_recency_hot(
+        df_recent_num, recency_scores_front, recency_scores_back, dlt_stats["bucket_target"], rng_hot
+    )
+    method_results.append(
+        {
+            "name": "方法四：指数记忆热度（近期高权重）",
+            "desc": "思路：强调近期出现频次较高的号码。",
+            "fronts": fronts_d,
+            "backs": backs_d,
+        }
+    )
+
+    fronts_e, backs_e = predict_dlt_cycle_reversion(
+        df_recent_num, dlt_stats["bucket_target"], rng_cycle
+    )
+    method_results.append(
+        {
+            "name": "方法五：周期回归（间隔接近均值）",
+            "desc": "思路：选择间隔接近历史均值的号码。",
+            "fronts": fronts_e,
+            "backs": backs_e,
+        }
+    )
+
+    fronts_f, backs_f = predict_dlt_mirror(
+        df_recent_num, latest_row, recency_scores_front, recency_scores_back, rng_mirror
+    )
+    method_results.append(
+        {
+            "name": "方法六：镜像映射（对称扰动）",
+            "desc": "思路：围绕中点对称映射并做轻微扰动。",
+            "fronts": fronts_f,
+            "backs": backs_f,
+        }
+    )
+
+    fronts_g, backs_g = predict_dlt_markov(
+        df_recent_num, dlt_stats["bucket_target"], rng_markov
+    )
+    method_results.append(
+        {
+            "name": "方法七：马尔可夫转移（状态概率）",
+            "desc": "思路：依据上一期状态估计下一期转移概率。",
+            "fronts": fronts_g,
+            "backs": backs_g,
+        }
+    )
+
+    fronts_h, backs_h = predict_dlt_bayesian(
+        df_recent_num, dlt_stats["bucket_target"], rng_bayes
+    )
+    method_results.append(
+        {
+            "name": "方法八：贝叶斯更新（后验均值）",
+            "desc": "思路：用先验与频次更新后验概率。",
+            "fronts": fronts_h,
+            "backs": backs_h,
+        }
+    )
+
+    fronts_i, backs_i = predict_dlt_multinomial_poisson(
+        df_recent_num, dlt_stats["bucket_target"], rng_poisson
+    )
+    method_results.append(
+        {
+            "name": "方法九：多项/泊松稳定度",
+            "desc": "思路：衡量频次与期望次数的贴合度。",
+            "fronts": fronts_i,
+            "backs": backs_i,
+        }
+    )
+
+    fronts_j, backs_j = predict_dlt_time_series(df_recent_num, dlt_stats, rng_time)
+    method_results.append(
+        {
+            "name": "方法十：时间序列趋势（和值预测）",
+            "desc": "思路：以和值趋势为目标进行组合搜索。",
+            "fronts": fronts_j,
+            "backs": backs_j,
+        }
+    )
+
+    fronts_k, backs_k = predict_dlt_mutual_info(df_recent_num, dlt_stats, rng_mi)
+    method_results.append(
+        {
+            "name": "方法十一：互信息网络（弱关联）",
+            "desc": "思路：尽量选取互信息较低的号码组合。",
+            "fronts": fronts_k,
+            "backs": backs_k,
+        }
+    )
+
+    fronts_l, backs_l = predict_dlt_combo_opt(df_recent_num, dlt_stats, rng_combo)
+    method_results.append(
+        {
+            "name": "方法十二：组合优化（多目标约束）",
+            "desc": "思路：同时约束和值、奇偶与区间结构。",
+            "fronts": fronts_l,
+            "backs": backs_l,
+        }
+    )
+
+    fronts_m, backs_m = predict_dlt_monte_carlo(df_recent_num, dlt_stats, rng_mc)
+    method_results.append(
+        {
+            "name": "方法十三：Bootstrap/Monte Carlo 模拟",
+            "desc": "思路：概率模拟后选择出现频率较高组合。",
+            "fronts": fronts_m,
+            "backs": backs_m,
+        }
+    )
+
+    fronts_n, backs_n = predict_dlt_volatility_reversion(df_recent_num, dlt_stats, rng_vol)
+    method_results.append(
+        {
+            "name": "方法十四：波动回归（和值均值回归）",
+            "desc": "思路：依据近期和值偏离进行回归预测。",
+            "fronts": fronts_n,
+            "backs": backs_n,
+        }
+    )
+
+    fronts_o, backs_o = predict_dlt_phase_space(df_recent_num, dlt_stats, rng_phase)
+    method_results.append(
+        {
+            "name": "方法十五：复杂系统相空间类比",
+            "desc": "思路：寻找相似和值轨迹并预测下一步。",
+            "fronts": fronts_o,
+            "backs": backs_o,
+        }
+    )
+
+    return method_results
+
+
+def build_sd_method_results(
+    df_recent_num: pd.DataFrame,
+    sd_stats: Dict[str, float],
+    sd_recency_scores: Dict[str, Dict[int, float]],
+    base_seed: int,
+) -> List[Dict[str, object]]:
+    # 生成福彩3D方法明细
+    rng_entropy = random.Random(base_seed + 11)
+    rng_gap = random.Random(base_seed + 17)
+    rng_markov = random.Random(base_seed + 23)
+    rng_bayes = random.Random(base_seed + 29)
+    rng_poisson = random.Random(base_seed + 31)
+    rng_time = random.Random(base_seed + 37)
+    rng_mi = random.Random(base_seed + 41)
+    rng_combo = random.Random(base_seed + 43)
+    rng_mc = random.Random(base_seed + 47)
+    rng_vol = random.Random(base_seed + 53)
+    rng_phase = random.Random(base_seed + 59)
+    rng_hot = random.Random(base_seed + 61)
+    rng_cycle = random.Random(base_seed + 67)
+    rng_mirror = random.Random(base_seed + 71)
+
+    sd_results: List[Dict[str, object]] = []
+
+    digits_a = predict_sd_entropy(df_recent_num, rng_entropy)
+    sd_results.append(
+        {
+            "name": "方法一：熵平衡（冷号权重）",
+            "desc": "思路：对低频数字赋予更高权重，进行位置抽样。",
+            "digits": digits_a,
+        }
+    )
+
+    digits_b = predict_sd_gap_wave(df_recent_num, rng_gap)
+    sd_results.append(
+        {
+            "name": "方法二：间隔波动（中等空档）",
+            "desc": "思路：偏好出现间隔接近中位数的数字。",
+            "digits": digits_b,
+        }
+    )
+
+    digits_c = predict_sd_markov(df_recent_num, rng_markov)
+    sd_results.append(
+        {
+            "name": "方法三：马尔可夫转移（位置状态）",
+            "desc": "思路：利用上一期数字的转移概率选择下一期。",
+            "digits": digits_c,
+        }
+    )
+
+    digits_d = predict_sd_bayesian(df_recent_num, rng_bayes)
+    sd_results.append(
+        {
+            "name": "方法四：贝叶斯更新（后验均值）",
+            "desc": "思路：用先验与频次更新得到位置后验。",
+            "digits": digits_d,
+        }
+    )
+
+    digits_e = predict_sd_poisson(df_recent_num, rng_poisson)
+    sd_results.append(
+        {
+            "name": "方法五：多项/泊松稳定度",
+            "desc": "思路：衡量频次与期望出现次数的贴合度。",
+            "digits": digits_e,
+        }
+    )
+
+    digits_f = predict_sd_time_series(df_recent_num, sd_stats, rng_time)
+    sd_results.append(
+        {
+            "name": "方法六：时间序列趋势（和值预测）",
+            "desc": "思路：以和值趋势为目标进行组合搜索。",
+            "digits": digits_f,
+        }
+    )
+
+    digits_g = predict_sd_mutual_info(df_recent_num, sd_stats, rng_mi)
+    sd_results.append(
+        {
+            "name": "方法七：互信息网络（弱关联）",
+            "desc": "思路：尽量选取互信息较低的数字组合。",
+            "digits": digits_g,
+        }
+    )
+
+    digits_h = predict_sd_combo_opt(df_recent_num, sd_stats, rng_combo)
+    sd_results.append(
+        {
+            "name": "方法八：组合优化（多目标约束）",
+            "desc": "思路：同时约束和值、奇偶与大小结构。",
+            "digits": digits_h,
+        }
+    )
+
+    digits_i = predict_sd_monte_carlo(df_recent_num, rng_mc)
+    sd_results.append(
+        {
+            "name": "方法九：Bootstrap/Monte Carlo 模拟",
+            "desc": "思路：概率模拟后选择出现频率最高组合。",
+            "digits": digits_i,
+        }
+    )
+
+    digits_j = predict_sd_volatility(df_recent_num, sd_stats, rng_vol)
+    sd_results.append(
+        {
+            "name": "方法十：波动回归（和值均值回归）",
+            "desc": "思路：依据近期和值偏离进行回归预测。",
+            "digits": digits_j,
+        }
+    )
+
+    digits_k = predict_sd_phase_space(df_recent_num, sd_stats, rng_phase)
+    sd_results.append(
+        {
+            "name": "方法十一：复杂系统相空间类比",
+            "desc": "思路：寻找相似和值轨迹并预测下一步。",
+            "digits": digits_k,
+        }
+    )
+
+    digits_l = predict_sd_recency_hot(df_recent_num, sd_recency_scores, rng_hot)
+    sd_results.append(
+        {
+            "name": "方法十二：指数记忆热度（近期高权重）",
+            "desc": "思路：强调近期出现频次较高的数字。",
+            "digits": digits_l,
+        }
+    )
+
+    digits_m = predict_sd_cycle_reversion(df_recent_num, rng_cycle)
+    sd_results.append(
+        {
+            "name": "方法十三：周期回归（间隔接近均值）",
+            "desc": "思路：选择间隔接近均值的数字。",
+            "digits": digits_m,
+        }
+    )
+
+    digits_n = predict_sd_mirror(df_recent_num)
+    sd_results.append(
+        {
+            "name": "方法十四：镜像映射（对称扰动）",
+            "desc": "思路：对最新数字做镜像映射。",
+            "digits": digits_n,
+        }
+    )
+
+    return sd_results
 
 
 def sample_red_numbers(rng: random.Random, weights: Dict[int, float] | None = None) -> List[int]:
@@ -1229,13 +1818,15 @@ def build_sd_ensemble(
     method_results: List[Dict[str, object]],
     recency_scores: Dict[str, Dict[int, float]],
     rng: random.Random,
+    method_weights: List[float] | None = None,
 ) -> List[int]:
     # 福彩3D 综合投票
-    votes = {col: {d: 0 for d in range(10)} for col in SD_DIGIT_COLS}
-    for item in method_results:
+    votes = {col: {d: 0.0 for d in range(10)} for col in SD_DIGIT_COLS}
+    for idx, item in enumerate(method_results):
+        weight = method_weights[idx] if method_weights and idx < len(method_weights) else 1.0
         digits = item["digits"]
         for idx, col in enumerate(SD_DIGIT_COLS):
-            votes[col][int(digits[idx])] += 1
+            votes[col][int(digits[idx])] += weight
 
     result: List[int] = []
     for col in SD_DIGIT_COLS:
@@ -2315,6 +2906,26 @@ def main() -> None:
         base_seed = latest_issue_seed + latest_date_seed
         sd_stats = compute_sd_stats(df_sd_recent_num)
         sd_recency_scores = compute_sd_recency_scores(df_sd_recent_num, half_life=60)
+        sd_method_weights: List[float] | None = None
+        df_sd_prev = df_sd.iloc[1 : n_periods_sd + 1].copy()
+        if not df_sd_prev.empty:
+            df_sd_prev_num = to_numeric_sd_df(df_sd_prev)
+            if not df_sd_prev_num.empty:
+                latest_sd_prev = df_sd_prev.iloc[0]
+                latest_prev_issue_seed = int(str(latest_sd_prev["issue"]).lstrip("0") or "0")
+                latest_prev_date_seed = (
+                    int(latest_sd_prev[DATE_COL].strftime("%Y%m%d"))
+                    if pd.notna(latest_sd_prev[DATE_COL])
+                    else 0
+                )
+                base_seed_prev = latest_prev_issue_seed + latest_prev_date_seed
+                sd_stats_prev = compute_sd_stats(df_sd_prev_num)
+                sd_recency_scores_prev = compute_sd_recency_scores(df_sd_prev_num, half_life=60)
+                sd_prev_results = build_sd_method_results(
+                    df_sd_prev_num, sd_stats_prev, sd_recency_scores_prev, base_seed_prev
+                )
+                actual_digits = [int(latest_sd[col]) for col in SD_DIGIT_COLS]
+                sd_method_weights = compute_sd_method_weights(sd_prev_results, actual_digits)
 
         metric_cols = st.columns(4)
         metric_cols[0].metric("最新期号", latest_sd["issue"])
@@ -2351,157 +2962,34 @@ def main() -> None:
 
         with tab_predict:
             st.markdown("**数学创意预测（仅供娱乐）**")
-            rng_entropy = random.Random(base_seed + 11)
-            rng_gap = random.Random(base_seed + 17)
-            rng_markov = random.Random(base_seed + 23)
-            rng_bayes = random.Random(base_seed + 29)
-            rng_poisson = random.Random(base_seed + 31)
-            rng_time = random.Random(base_seed + 37)
-            rng_mi = random.Random(base_seed + 41)
-            rng_combo = random.Random(base_seed + 43)
-            rng_mc = random.Random(base_seed + 47)
-            rng_vol = random.Random(base_seed + 53)
-            rng_phase = random.Random(base_seed + 59)
-            rng_hot = random.Random(base_seed + 61)
-            rng_cycle = random.Random(base_seed + 67)
-            rng_mirror = random.Random(base_seed + 71)
-            rng_reco = random.Random(base_seed + 79)
+            rng_reco_base = random.Random(base_seed + 79)
+            rng_reco_feedback = random.Random(base_seed + 79)
 
-            sd_results: List[Dict[str, object]] = []
-
-            digits_a = predict_sd_entropy(df_sd_recent_num, rng_entropy)
-            sd_results.append(
-                {
-                    "name": "方法一：熵平衡（冷号权重）",
-                    "desc": "思路：对低频数字赋予更高权重，进行位置抽样。",
-                    "digits": digits_a,
-                }
+            sd_results = build_sd_method_results(
+                df_sd_recent_num, sd_stats, sd_recency_scores, base_seed
             )
+            sd_base = build_sd_ensemble(sd_results, sd_recency_scores, rng_reco_base)
+            sd_base_sum = sum(sd_base)
 
-            digits_b = predict_sd_gap_wave(df_sd_recent_num, rng_gap)
-            sd_results.append(
-                {
-                    "name": "方法二：间隔波动（中等空档）",
-                    "desc": "思路：偏好出现间隔接近中位数的数字。",
-                    "digits": digits_b,
-                }
-            )
-
-            digits_c = predict_sd_markov(df_sd_recent_num, rng_markov)
-            sd_results.append(
-                {
-                    "name": "方法三：马尔可夫转移（位置状态）",
-                    "desc": "思路：利用上一期数字的转移概率选择下一期。",
-                    "digits": digits_c,
-                }
-            )
-
-            digits_d = predict_sd_bayesian(df_sd_recent_num, rng_bayes)
-            sd_results.append(
-                {
-                    "name": "方法四：贝叶斯更新（后验均值）",
-                    "desc": "思路：用先验与频次更新得到位置后验。",
-                    "digits": digits_d,
-                }
-            )
-
-            digits_e = predict_sd_poisson(df_sd_recent_num, rng_poisson)
-            sd_results.append(
-                {
-                    "name": "方法五：多项/泊松稳定度",
-                    "desc": "思路：衡量频次与期望出现次数的贴合度。",
-                    "digits": digits_e,
-                }
-            )
-
-            digits_f = predict_sd_time_series(df_sd_recent_num, sd_stats, rng_time)
-            sd_results.append(
-                {
-                    "name": "方法六：时间序列趋势（和值预测）",
-                    "desc": "思路：以和值趋势为目标进行组合搜索。",
-                    "digits": digits_f,
-                }
-            )
-
-            digits_g = predict_sd_mutual_info(df_sd_recent_num, sd_stats, rng_mi)
-            sd_results.append(
-                {
-                    "name": "方法七：互信息网络（弱关联）",
-                    "desc": "思路：尽量选取互信息较低的数字组合。",
-                    "digits": digits_g,
-                }
-            )
-
-            digits_h = predict_sd_combo_opt(df_sd_recent_num, sd_stats, rng_combo)
-            sd_results.append(
-                {
-                    "name": "方法八：组合优化（多目标约束）",
-                    "desc": "思路：同时约束和值、奇偶与大小结构。",
-                    "digits": digits_h,
-                }
-            )
-
-            digits_i = predict_sd_monte_carlo(df_sd_recent_num, rng_mc)
-            sd_results.append(
-                {
-                    "name": "方法九：Bootstrap/Monte Carlo 模拟",
-                    "desc": "思路：概率模拟后选择出现频率最高组合。",
-                    "digits": digits_i,
-                }
-            )
-
-            digits_j = predict_sd_volatility(df_sd_recent_num, sd_stats, rng_vol)
-            sd_results.append(
-                {
-                    "name": "方法十：波动回归（和值均值回归）",
-                    "desc": "思路：依据近期和值偏离进行回归预测。",
-                    "digits": digits_j,
-                }
-            )
-
-            digits_k = predict_sd_phase_space(df_sd_recent_num, sd_stats, rng_phase)
-            sd_results.append(
-                {
-                    "name": "方法十一：复杂系统相空间类比",
-                    "desc": "思路：寻找相似和值轨迹并预测下一步。",
-                    "digits": digits_k,
-                }
-            )
-
-            digits_l = predict_sd_recency_hot(df_sd_recent_num, sd_recency_scores, rng_hot)
-            sd_results.append(
-                {
-                    "name": "方法十二：指数记忆热度（近期高权重）",
-                    "desc": "思路：强调近期出现频次较高的数字。",
-                    "digits": digits_l,
-                }
-            )
-
-            digits_m = predict_sd_cycle_reversion(df_sd_recent_num, rng_cycle)
-            sd_results.append(
-                {
-                    "name": "方法十三：周期回归（间隔接近均值）",
-                    "desc": "思路：选择间隔接近均值的数字。",
-                    "digits": digits_m,
-                }
-            )
-
-            digits_n = predict_sd_mirror(df_sd_recent_num)
-            sd_results.append(
-                {
-                    "name": "方法十四：镜像映射（对称扰动）",
-                    "desc": "思路：对最新数字做镜像映射。",
-                    "digits": digits_n,
-                }
-            )
-
-            sd_recommend = build_sd_ensemble(sd_results, sd_recency_scores, rng_reco)
-            sd_sum = sum(sd_recommend)
-
-            st.markdown("**综合推荐号码**")
-            render_sd_row([str(d) for d in sd_recommend], sd_sum)
-            st.code(format_sd_ticket(sd_recommend))
+            st.markdown("**基础推荐号码**")
+            render_sd_row([str(d) for d in sd_base], sd_base_sum)
+            st.code(format_sd_ticket(sd_base))
             st.caption("综合规则：多方法投票 + 近期热度微调。")
+
+            if sd_method_weights:
+                sd_feedback = build_sd_ensemble(
+                    sd_results,
+                    sd_recency_scores,
+                    rng_reco_feedback,
+                    method_weights=sd_method_weights,
+                )
+                sd_feedback_sum = sum(sd_feedback)
+                st.markdown("**反馈推荐号码**")
+                render_sd_row([str(d) for d in sd_feedback], sd_feedback_sum)
+                st.code(format_sd_ticket(sd_feedback))
+                st.caption("反馈逻辑：依据上一期实际号码对方法投票权重自动调整。")
+            else:
+                st.caption("反馈逻辑：历史期数不足，默认使用基础推荐。")
 
             for idx, item in enumerate(sd_results):
                 expanded = idx == 0
@@ -2547,6 +3035,39 @@ def main() -> None:
             df_dlt_recent_num, range(1, 13), DLT_BACK_COLS, half_life=40
         )
         dlt_stats = compute_dlt_front_stats(df_dlt_recent_num)
+        dlt_method_weights: List[float] | None = None
+        df_dlt_prev = df_dlt.iloc[1 : n_periods_dlt + 1].copy()
+        if not df_dlt_prev.empty:
+            df_dlt_prev_num = to_numeric_dlt_df(df_dlt_prev)
+            if not df_dlt_prev_num.empty:
+                latest_dlt_prev = df_dlt_prev.iloc[0]
+                latest_prev_issue_seed = int(str(latest_dlt_prev["issue"]).lstrip("0") or "0")
+                latest_prev_date_seed = (
+                    int(latest_dlt_prev[DATE_COL].strftime("%Y%m%d"))
+                    if pd.notna(latest_dlt_prev[DATE_COL])
+                    else 0
+                )
+                base_seed_prev = latest_prev_issue_seed + latest_prev_date_seed
+                recency_front_prev = compute_recency_scores(
+                    df_dlt_prev_num, range(1, 36), DLT_FRONT_COLS, half_life=60
+                )
+                recency_back_prev = compute_recency_scores(
+                    df_dlt_prev_num, range(1, 13), DLT_BACK_COLS, half_life=40
+                )
+                dlt_stats_prev = compute_dlt_front_stats(df_dlt_prev_num)
+                dlt_prev_results = build_dlt_method_results(
+                    df_dlt_prev_num,
+                    df_dlt_prev_num.iloc[0],
+                    recency_front_prev,
+                    recency_back_prev,
+                    dlt_stats_prev,
+                    base_seed_prev,
+                )
+                actual_fronts = [int(latest_dlt[col]) for col in DLT_FRONT_COLS]
+                actual_backs = [int(latest_dlt[col]) for col in DLT_BACK_COLS]
+                dlt_method_weights = compute_dlt_method_weights(
+                    dlt_prev_results, actual_fronts, actual_backs
+                )
 
         metric_cols = st.columns(4)
         metric_cols[0].metric("最新期号", latest_dlt["issue"])
@@ -2592,195 +3113,48 @@ def main() -> None:
 
         with tab_predict:
             st.markdown("**数学创意预测（仅供娱乐）**")
-            rng_entropy = random.Random(base_seed + 11)
-            rng_gap = random.Random(base_seed + 23)
-            rng_cluster = random.Random(base_seed + 29)
-            rng_hot = random.Random(base_seed + 31)
-            rng_cycle = random.Random(base_seed + 37)
-            rng_mirror = random.Random(base_seed + 41)
-            rng_markov = random.Random(base_seed + 47)
-            rng_bayes = random.Random(base_seed + 53)
-            rng_poisson = random.Random(base_seed + 59)
-            rng_time = random.Random(base_seed + 61)
-            rng_mi = random.Random(base_seed + 67)
-            rng_combo = random.Random(base_seed + 71)
-            rng_mc = random.Random(base_seed + 73)
-            rng_vol = random.Random(base_seed + 79)
-            rng_phase = random.Random(base_seed + 83)
-            rng_reco = random.Random(base_seed + 97)
+            rng_reco_base = random.Random(base_seed + 97)
+            rng_reco_feedback = random.Random(base_seed + 97)
 
-            dlt_results: List[Dict[str, object]] = []
-
-            fronts_a, backs_a = predict_dlt_entropy(df_dlt_recent_num, dlt_stats["bucket_target"], rng_entropy)
-            dlt_results.append(
-                {
-                    "name": "方法一：分段熵平衡（冷热反向权重）",
-                    "desc": "思路：对低频号码赋予更高权重，并按区间抽样。",
-                    "fronts": fronts_a,
-                    "backs": backs_a,
-                }
+            dlt_results = build_dlt_method_results(
+                df_dlt_recent_num,
+                df_dlt_recent_num.iloc[0],
+                recency_scores_front,
+                recency_scores_back,
+                dlt_stats,
+                base_seed,
             )
 
-            fronts_b, backs_b = predict_dlt_gap_wave(df_dlt_recent_num, rng_gap)
-            dlt_results.append(
-                {
-                    "name": "方法二：间隔波动（偏好中等空档）",
-                    "desc": "思路：偏向出现间隔接近中位数的号码。",
-                    "fronts": fronts_b,
-                    "backs": backs_b,
-                }
+            base_fronts, base_backs = build_dlt_ensemble(
+                dlt_results,
+                recency_scores_front,
+                recency_scores_back,
+                dlt_stats["bucket_target"],
+                rng_reco_base,
             )
 
-            fronts_c, backs_c = predict_dlt_anti_cluster(df_dlt_recent_num, rng_cluster)
-            dlt_results.append(
-                {
-                    "name": "方法三：反聚类协同网络（弱相关组合）",
-                    "desc": "思路：选择共现次数较少的号码组合。",
-                    "fronts": fronts_c,
-                    "backs": backs_c,
-                }
-            )
-
-            fronts_d, backs_d = predict_dlt_recency_hot(
-                df_dlt_recent_num, recency_scores_front, recency_scores_back, dlt_stats["bucket_target"], rng_hot
-            )
-            dlt_results.append(
-                {
-                    "name": "方法四：指数记忆热度（近期高权重）",
-                    "desc": "思路：强调近期出现频次较高的号码。",
-                    "fronts": fronts_d,
-                    "backs": backs_d,
-                }
-            )
-
-            fronts_e, backs_e = predict_dlt_cycle_reversion(
-                df_dlt_recent_num, dlt_stats["bucket_target"], rng_cycle
-            )
-            dlt_results.append(
-                {
-                    "name": "方法五：周期回归（间隔接近均值）",
-                    "desc": "思路：选择间隔接近历史均值的号码。",
-                    "fronts": fronts_e,
-                    "backs": backs_e,
-                }
-            )
-
-            fronts_f, backs_f = predict_dlt_mirror(
-                df_dlt_recent_num, latest_dlt, recency_scores_front, recency_scores_back, rng_mirror
-            )
-            dlt_results.append(
-                {
-                    "name": "方法六：镜像映射（对称扰动）",
-                    "desc": "思路：围绕中点对称映射并做轻微扰动。",
-                    "fronts": fronts_f,
-                    "backs": backs_f,
-                }
-            )
-
-            fronts_g, backs_g = predict_dlt_markov(
-                df_dlt_recent_num, dlt_stats["bucket_target"], rng_markov
-            )
-            dlt_results.append(
-                {
-                    "name": "方法七：马尔可夫转移（状态概率）",
-                    "desc": "思路：依据上一期状态估计下一期转移概率。",
-                    "fronts": fronts_g,
-                    "backs": backs_g,
-                }
-            )
-
-            fronts_h, backs_h = predict_dlt_bayesian(
-                df_dlt_recent_num, dlt_stats["bucket_target"], rng_bayes
-            )
-            dlt_results.append(
-                {
-                    "name": "方法八：贝叶斯更新（后验均值）",
-                    "desc": "思路：用先验与频次更新后验概率。",
-                    "fronts": fronts_h,
-                    "backs": backs_h,
-                }
-            )
-
-            fronts_i, backs_i = predict_dlt_multinomial_poisson(
-                df_dlt_recent_num, dlt_stats["bucket_target"], rng_poisson
-            )
-            dlt_results.append(
-                {
-                    "name": "方法九：多项/泊松稳定度",
-                    "desc": "思路：衡量频次与期望次数的贴合度。",
-                    "fronts": fronts_i,
-                    "backs": backs_i,
-                }
-            )
-
-            fronts_j, backs_j = predict_dlt_time_series(df_dlt_recent_num, dlt_stats, rng_time)
-            dlt_results.append(
-                {
-                    "name": "方法十：时间序列趋势（和值预测）",
-                    "desc": "思路：以和值趋势为目标进行组合搜索。",
-                    "fronts": fronts_j,
-                    "backs": backs_j,
-                }
-            )
-
-            fronts_k, backs_k = predict_dlt_mutual_info(df_dlt_recent_num, dlt_stats, rng_mi)
-            dlt_results.append(
-                {
-                    "name": "方法十一：互信息网络（弱关联）",
-                    "desc": "思路：尽量选取互信息较低的号码组合。",
-                    "fronts": fronts_k,
-                    "backs": backs_k,
-                }
-            )
-
-            fronts_l, backs_l = predict_dlt_combo_opt(df_dlt_recent_num, dlt_stats, rng_combo)
-            dlt_results.append(
-                {
-                    "name": "方法十二：组合优化（多目标约束）",
-                    "desc": "思路：同时约束和值、奇偶与区间结构。",
-                    "fronts": fronts_l,
-                    "backs": backs_l,
-                }
-            )
-
-            fronts_m, backs_m = predict_dlt_monte_carlo(df_dlt_recent_num, dlt_stats, rng_mc)
-            dlt_results.append(
-                {
-                    "name": "方法十三：Bootstrap/Monte Carlo 模拟",
-                    "desc": "思路：概率模拟后选择出现频率较高组合。",
-                    "fronts": fronts_m,
-                    "backs": backs_m,
-                }
-            )
-
-            fronts_n, backs_n = predict_dlt_volatility_reversion(df_dlt_recent_num, dlt_stats, rng_vol)
-            dlt_results.append(
-                {
-                    "name": "方法十四：波动回归（和值均值回归）",
-                    "desc": "思路：依据近期和值偏离进行回归预测。",
-                    "fronts": fronts_n,
-                    "backs": backs_n,
-                }
-            )
-
-            fronts_o, backs_o = predict_dlt_phase_space(df_dlt_recent_num, dlt_stats, rng_phase)
-            dlt_results.append(
-                {
-                    "name": "方法十五：复杂系统相空间类比",
-                    "desc": "思路：寻找相似和值轨迹并预测下一步。",
-                    "fronts": fronts_o,
-                    "backs": backs_o,
-                }
-            )
-
-            recommend_fronts, recommend_backs = build_dlt_ensemble(
-                dlt_results, recency_scores_front, recency_scores_back, dlt_stats["bucket_target"], rng_reco
-            )
-
-            st.markdown("**综合推荐号码**")
-            render_dlt_row([f"{n:02d}" for n in recommend_fronts], [f"{n:02d}" for n in recommend_backs])
-            st.code(format_dlt_ticket(recommend_fronts, recommend_backs))
+            st.markdown("**基础推荐号码**")
+            render_dlt_row([f"{n:02d}" for n in base_fronts], [f"{n:02d}" for n in base_backs])
+            st.code(format_dlt_ticket(base_fronts, base_backs))
             st.caption("综合规则：多方法投票 + 近期热度微调 + 分区约束。")
+
+            if dlt_method_weights:
+                feedback_fronts, feedback_backs = build_dlt_ensemble(
+                    dlt_results,
+                    recency_scores_front,
+                    recency_scores_back,
+                    dlt_stats["bucket_target"],
+                    rng_reco_feedback,
+                    method_weights=dlt_method_weights,
+                )
+                st.markdown("**反馈推荐号码**")
+                render_dlt_row(
+                    [f"{n:02d}" for n in feedback_fronts], [f"{n:02d}" for n in feedback_backs]
+                )
+                st.code(format_dlt_ticket(feedback_fronts, feedback_backs))
+                st.caption("反馈逻辑：依据上一期实际号码对方法投票权重自动调整。")
+            else:
+                st.caption("反馈逻辑：历史期数不足，默认使用基础推荐。")
 
             for idx, item in enumerate(dlt_results):
                 expanded = idx == 0
@@ -2820,6 +3194,37 @@ def main() -> None:
     recency_scores_red = compute_recency_scores(df_recent_num, range(1, 34), RED_COLS, half_life=60)
     recency_scores_blue = compute_recency_scores(df_recent_num, range(1, 17), [BLUE_COL], half_life=40)
     red_stats = compute_red_stats(df_recent_num)
+    ssq_method_weights: List[float] | None = None
+    df_prev = df.iloc[1 : n_periods + 1].copy()
+    if not df_prev.empty:
+        df_prev_num = to_numeric_df(df_prev)
+        if not df_prev_num.empty:
+            latest_prev = df_prev.iloc[0]
+            latest_prev_issue_seed = int(str(latest_prev["issue"]).lstrip("0") or "0")
+            latest_prev_date_seed = (
+                int(latest_prev[DATE_COL].strftime("%Y%m%d")) if pd.notna(latest_prev[DATE_COL]) else 0
+            )
+            base_seed_prev = latest_prev_issue_seed + latest_prev_date_seed
+            recency_red_prev = compute_recency_scores(
+                df_prev_num, range(1, 34), RED_COLS, half_life=60
+            )
+            recency_blue_prev = compute_recency_scores(
+                df_prev_num, range(1, 17), [BLUE_COL], half_life=40
+            )
+            red_stats_prev = compute_red_stats(df_prev_num)
+            ssq_prev_results = build_ssq_method_results(
+                df_prev_num,
+                df_prev_num.iloc[0],
+                recency_red_prev,
+                recency_blue_prev,
+                red_stats_prev,
+                base_seed_prev,
+            )
+            actual_reds = [int(latest[col]) for col in RED_COLS]
+            actual_blue = int(latest[BLUE_COL])
+            ssq_method_weights = compute_ssq_method_weights(
+                ssq_prev_results, actual_reds, actual_blue
+            )
 
     metric_cols = st.columns(4)
     metric_cols[0].metric("最新期号", latest["issue"])
@@ -2862,186 +3267,39 @@ def main() -> None:
 
     with tab_predict:
         st.markdown("**数学创意预测（仅供娱乐）**")
-        rng_entropy = random.Random(base_seed + 11)
-        rng_gap = random.Random(base_seed + 23)
-        rng_markov = random.Random(base_seed + 31)
-        rng_bayes = random.Random(base_seed + 37)
-        rng_poisson = random.Random(base_seed + 41)
-        rng_time = random.Random(base_seed + 47)
-        rng_mi = random.Random(base_seed + 53)
-        rng_combo = random.Random(base_seed + 59)
-        rng_mc = random.Random(base_seed + 61)
-        rng_vol = random.Random(base_seed + 67)
-        rng_phase = random.Random(base_seed + 71)
-        rng_hot = random.Random(base_seed + 73)
-        rng_cycle = random.Random(base_seed + 79)
-        rng_mirror = random.Random(base_seed + 83)
-        rng_reco = random.Random(base_seed + 97)
+        rng_reco_base = random.Random(base_seed + 97)
+        rng_reco_feedback = random.Random(base_seed + 97)
 
-        method_results: List[Dict[str, object]] = []
-
-        reds_a, blue_a = predict_method_entropy(df_recent_num, rng_entropy)
-        method_results.append(
-            {
-                "name": "方法一：分段熵平衡（冷热反向权重）",
-                "desc": "思路：把红球分为三个区间，各区间以冷号为主进行无放回抽样，形成分布更均匀的组合。",
-                "reds": reds_a,
-                "blue": blue_a,
-            }
+        method_results = build_ssq_method_results(
+            df_recent_num, latest_num, recency_scores_red, recency_scores_blue, red_stats, base_seed
         )
 
-        reds_b, blue_b = predict_method_gap_wave(df_recent_num, rng_gap)
-        method_results.append(
-            {
-                "name": "方法二：间隔波动（偏好中等空档）",
-                "desc": "思路：计算号码最近出现间隔，偏向选择空档处于中位数附近的号码。",
-                "reds": reds_b,
-                "blue": blue_b,
-            }
+        base_reds, base_blue = build_ensemble_recommendation(
+            method_results,
+            recency_scores_red,
+            recency_scores_blue,
+            rng_reco_base,
         )
 
-        reds_c, blue_c = predict_method_anti_cluster(df_recent_num)
-        method_results.append(
-            {
-                "name": "方法三：反聚类协同网络（弱相关组合）",
-                "desc": "思路：基于共现矩阵选取相互共现次数较少的号码，强调组合多样性。",
-                "reds": reds_c,
-                "blue": blue_c,
-            }
-        )
-
-        reds_d, blue_d = predict_method_markov(df_recent_num, rng_markov)
-        method_results.append(
-            {
-                "name": "方法四：马尔可夫转移（状态概率）",
-                "desc": "思路：基于上一期是否出现构造转移概率，估计下一期出现倾向。",
-                "reds": reds_d,
-                "blue": blue_d,
-            }
-        )
-
-        reds_e, blue_e = predict_method_bayesian(df_recent_num, rng_bayes)
-        method_results.append(
-            {
-                "name": "方法五：贝叶斯更新（后验均值）",
-                "desc": "思路：以先验为基底，用出现频次更新后验概率。",
-                "reds": reds_e,
-                "blue": blue_e,
-            }
-        )
-
-        reds_f, blue_f = predict_method_multinomial_poisson(df_recent_num, rng_poisson)
-        method_results.append(
-            {
-                "name": "方法六：多项/泊松稳定度",
-                "desc": "思路：根据泊松模型评估出现次数与期望值的贴合度。",
-                "reds": reds_f,
-                "blue": blue_f,
-            }
-        )
-
-        reds_g, blue_g = predict_method_time_series(df_recent_num, red_stats, rng_time)
-        method_results.append(
-            {
-                "name": "方法七：时间序列趋势（和值预测）",
-                "desc": "思路：用滚动趋势估计下一期和值并匹配组合。",
-                "reds": reds_g,
-                "blue": blue_g,
-            }
-        )
-
-        reds_h, blue_h = predict_method_mutual_info(df_recent_num, rng_mi)
-        method_results.append(
-            {
-                "name": "方法八：互信息网络（弱关联）",
-                "desc": "思路：优先选择互信息较低的号码组合，降低相关性。",
-                "reds": reds_h,
-                "blue": blue_h,
-            }
-        )
-
-        reds_i, blue_i = predict_method_combo_opt(df_recent_num, red_stats, rng_combo)
-        method_results.append(
-            {
-                "name": "方法九：组合优化（多目标约束）",
-                "desc": "思路：同时约束和值、跨度、奇偶与区间分布，搜索最优组合。",
-                "reds": reds_i,
-                "blue": blue_i,
-            }
-        )
-
-        reds_j, blue_j = predict_method_monte_carlo(df_recent_num, rng_mc)
-        method_results.append(
-            {
-                "name": "方法十：Bootstrap/Monte Carlo 模拟",
-                "desc": "思路：用概率模型进行多次模拟，统计出现频率并择优。",
-                "reds": reds_j,
-                "blue": blue_j,
-            }
-        )
-
-        reds_k, blue_k = predict_method_volatility_reversion(df_recent_num, red_stats, rng_vol)
-        method_results.append(
-            {
-                "name": "方法十一：波动回归（和值均值回归）",
-                "desc": "思路：基于最近和值偏离程度进行均值回归预测。",
-                "reds": reds_k,
-                "blue": blue_k,
-            }
-        )
-
-        reds_l, blue_l = predict_method_phase_space(df_recent_num, red_stats, rng_phase)
-        method_results.append(
-            {
-                "name": "方法十二：复杂系统相空间类比",
-                "desc": "思路：以相空间相似序列的后续走势估计目标和值。",
-                "reds": reds_l,
-                "blue": blue_l,
-            }
-        )
-
-        reds_m, blue_m = predict_method_recency_hot(
-            df_recent_num, recency_scores_red, recency_scores_blue, rng_hot
-        )
-        method_results.append(
-            {
-                "name": "方法十三：指数记忆热度（近期高权重）",
-                "desc": "思路：对近期开奖给予更高权重，倾向选取近期活跃号码。",
-                "reds": reds_m,
-                "blue": blue_m,
-            }
-        )
-
-        reds_n, blue_n = predict_method_cycle_reversion(df_recent_num, rng_cycle)
-        method_results.append(
-            {
-                "name": "方法十四：周期回归（间隔接近均值）",
-                "desc": "思路：选择当前间隔接近历史均值的号码，体现周期回归假设。",
-                "reds": reds_n,
-                "blue": blue_n,
-            }
-        )
-
-        reds_o, blue_o = predict_method_mirror(
-            df_recent_num, latest_num, recency_scores_red, rng_mirror
-        )
-        method_results.append(
-            {
-                "name": "方法十五：镜像映射（对称扰动）",
-                "desc": "思路：对最近一期号码做中点对称映射，并用冷号轻微扰动补齐。",
-                "reds": reds_o,
-                "blue": blue_o,
-            }
-        )
-
-        recommend_reds, recommend_blue = build_ensemble_recommendation(
-            method_results, recency_scores_red, recency_scores_blue, rng_reco
-        )
-
-        st.markdown("**综合推荐号码**")
-        render_ball_row([f"{n:02d}" for n in recommend_reds], f"{recommend_blue:02d}")
-        st.code(format_ticket(recommend_reds, recommend_blue))
+        st.markdown("**基础推荐号码**")
+        render_ball_row([f"{n:02d}" for n in base_reds], f"{base_blue:02d}")
+        st.code(format_ticket(base_reds, base_blue))
         st.caption("综合规则：多方法投票 + 近期热度微调 + 分区约束。")
+
+        if ssq_method_weights:
+            feedback_reds, feedback_blue = build_ensemble_recommendation(
+                method_results,
+                recency_scores_red,
+                recency_scores_blue,
+                rng_reco_feedback,
+                method_weights=ssq_method_weights,
+            )
+            st.markdown("**反馈推荐号码**")
+            render_ball_row([f"{n:02d}" for n in feedback_reds], f"{feedback_blue:02d}")
+            st.code(format_ticket(feedback_reds, feedback_blue))
+            st.caption("反馈逻辑：依据上一期实际号码对方法投票权重自动调整。")
+        else:
+            st.caption("反馈逻辑：历史期数不足，默认使用基础推荐。")
 
         for idx, item in enumerate(method_results):
             expanded = idx == 0

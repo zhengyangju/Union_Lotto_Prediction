@@ -1,19 +1,19 @@
-# 彩票数据分析与趋势实验室
+﻿# 彩票数据分析与趋势实验室
 
 本项目用于抓取双色球、超级大乐透与福彩3D历史数据，生成 Excel，并在 Streamlit 界面中进行多维可视化分析与数学创意预测展示。
 
+> 已移除自动安装与自动运行脚本，请按下方步骤手动安装与启动。
+
 ## 功能概览
-- 抓取双色球历史开奖数据并保存为 Excel
-- 抓取大乐透历史开奖数据并保存为 Excel
-- 抓取福彩3D历史开奖数据并保存为 Excel
+- 抓取双色球/大乐透/福彩3D历史开奖数据并保存为 Excel
 - 支持选择最近 100 期或自定义期数进行分析
 - 输出多种走势图（频次、走势、和值、跨度、奇偶结构等）
-- 提供多种数学创意预测方法，并给出综合推荐号码
-- 自动保存图像为 JPG（300 DPI，Times New Roman）
+- 提供多种数学创意预测方法并给出综合推荐号码
+- 图表保存为 JPG（300 DPI），文字为英文，Times New Roman 字体
 
 ## 环境要求
 - Python 3.10
-- Windows / macOS / Linux 均可运行
+- Windows / macOS / Linux
 
 ## 安装依赖
 ```bash
@@ -21,17 +21,12 @@ pip install -r requirements.txt
 ```
 
 ## 快速开始
-
-### Windows 一键安装与启动（适合不懂 Python 的用户）
-1. 双击 `install_windows.bat`，自动安装 Python 并安装依赖。
-2. 双击 `run_app.bat` 启动程序。
-
 ### 1. 下载/更新历史数据
 ```bash
 python fetch_ssq_history.py
 ```
 
-自定义抓取期数与输出路径：
+自定义期数与输出路径：
 ```bash
 python fetch_ssq_history.py --limit 5000 --output ssq_history.xlsx
 ```
@@ -58,28 +53,28 @@ streamlit run streamlit_app.py
 - 查看最新一期号码、走势图与预测结果
 
 ## 输出说明
-- `ssq_history.xlsx`：抓取后的历史数据文件
-- `dlt_history.xlsx`：大乐透历史数据文件
-- `sd_history.xlsx`：福彩3D历史数据文件
+- `ssq_history.xlsx`：双色球历史数据
+- `dlt_history.xlsx`：大乐透历史数据
+- `sd_history.xlsx`：福彩3D历史数据
 - `plots/`：自动保存的走势图图片（JPG，300 DPI）
 
 ## 项目结构
 ```
 .
-├── fetch_ssq_history.py     # 数据抓取与 Excel 生成
+├── fetch_ssq_history.py     # 双色球数据抓取与 Excel 生成
 ├── fetch_dlt_history.py     # 大乐透数据抓取与 Excel 生成
-├── fetch_sd_history.py      # 福彩3D 数据抓取与 Excel 生成
+├── fetch_sd_history.py      # 福彩3D数据抓取与 Excel 生成
 ├── streamlit_app.py         # Streamlit 可视化界面
 ├── ssq_history.xlsx         # 历史数据（可重新生成）
-├── dlt_history.xlsx         # 大乐透数据（可重新生成）
-├── sd_history.xlsx          # 福彩3D 数据（可重新生成）
-├── plots/                   # 输出图像目录（自动创建）
+├── dlt_history.xlsx         # 历史数据（可重新生成）
+├── sd_history.xlsx          # 历史数据（可重新生成）
+├── plots/                   # 图像输出目录（自动创建）
 ├── requirements.txt         # Python 依赖
 └── README.md                # 使用说明
 ```
 
 ## 预测方法说明（简要）
-- 分段熵平衡（冷热反向权重）
+- 分段热平衡（冷热反向权重）
 - 间隔波动（偏好中等空档）
 - 反聚类协同网络（弱相关组合）
 - 马尔可夫转移（状态概率）
@@ -97,7 +92,7 @@ streamlit run streamlit_app.py
 - 综合投票推荐（多方法投票 + 热度微调 + 分区约束）
 
 ## 免责声明
-本项目所有预测结果仅供学习与娱乐展示，不构成任何投注建议。请理性对待彩票。
+本项目所有预测结果仅供学习与娱乐展示，不构成任何投注建议，请理性对待彩票。
 
 ## 常见问题
 1. 若出现中文乱码，请确认文件编码为 UTF-8，并使用支持 UTF-8 的编辑器查看。
