@@ -70,7 +70,7 @@ def load_data(file_path: str) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def load_sd_data(file_path: str) -> pd.DataFrame:
-    # 读取福彩3D Excel 并做基础清洗
+    # 读取福彩3D Excel 并基础清洗
     df = pd.read_excel(file_path, engine="openpyxl")
     df["issue"] = normalize_numeric_str(df["issue"], 7)
     for col in SD_DIGIT_COLS:
@@ -2791,6 +2791,253 @@ def format_ticket(reds: List[int], blue: int) -> str:
     return f"{red_text} + {blue:02d}"
 
 
+def get_base_seed_from_row(row: pd.Series) -> int:
+    # 生成回测所需的随机种子
+    issue_seed = int(str(row["issue"]).lstrip("0") or "0")
+    date_seed = int(row[DATE_COL].strftime("%Y%m%d")) if pd.notna(row[DATE_COL]) else 0
+    return issue_seed + date_seed
+
+
+@st.cache_data(show_spinner=False)
+def run_ssq_backtest(df: pd.DataFrame, backtest_periods: int, train_window: int) -> pd.DataFrame:
+    # 双色球回测统计
+    df_sorted = df.sort_values("issue", ascending=False).reset_index(drop=True)
+    max_periods = len(df_sorted) - train_window - 1
+    periods = min(int(backtest_periods), int(max_periods))
+    if periods <= 0:
+        return pd.DataFrame()
+
+    stats: Dict[str, Dict[str, List[int]]] = {}
+    method_names: List[str] | None = None
+
+    for idx in range(periods):
+        train = df_sorted.iloc[idx + 1 : idx + 1 + train_window]
+        if train.empty:
+            continue
+        train_num = to_numeric_df(train)
+        if train_num.empty:
+            continue
+
+        base_seed = get_base_seed_from_row(train.iloc[0])
+        recency_scores_red = compute_recency_scores(train_num, range(1, 34), RED_COLS, half_life=60)
+        recency_scores_blue = compute_recency_scores(
+            train_num, range(1, 17), [BLUE_COL], half_life=40
+        )
+        red_stats = compute_red_stats(train_num)
+        method_results = build_ssq_method_results(
+            train_num, train_num.iloc[0], recency_scores_red, recency_scores_blue, red_stats, base_seed
+        )
+
+        if method_names is None:
+            method_names = [item["name"] for item in method_results] + ["综合推荐(等权)"]
+            stats = {name: {"red": [], "blue": [], "total": []} for name in method_names}
+
+        target = df_sorted.iloc[idx]
+        if pd.isna(target[BLUE_COL]):
+            continue
+        actual_reds = {int(target[col]) for col in RED_COLS if pd.notna(target[col])}
+        actual_blue = int(target[BLUE_COL])
+
+        for item in method_results:
+            reds = {int(n) for n in item["reds"]}
+            blue = int(item["blue"])
+            red_hit = len(reds & actual_reds)
+            blue_hit = 1 if blue == actual_blue else 0
+            stats[item["name"]]["red"].append(red_hit)
+            stats[item["name"]]["blue"].append(blue_hit)
+            stats[item["name"]]["total"].append(red_hit + blue_hit)
+
+        rng_reco = random.Random(base_seed + 97)
+        ens_reds, ens_blue = build_ensemble_recommendation(
+            method_results, recency_scores_red, recency_scores_blue, rng_reco
+        )
+        ens_red_hit = len(set(ens_reds) & actual_reds)
+        ens_blue_hit = 1 if ens_blue == actual_blue else 0
+        stats["综合推荐(等权)"]["red"].append(ens_red_hit)
+        stats["综合推荐(等权)"]["blue"].append(ens_blue_hit)
+        stats["综合推荐(等权)"]["total"].append(ens_red_hit + ens_blue_hit)
+
+    if not stats:
+        return pd.DataFrame()
+
+    rows: List[Dict[str, object]] = []
+    for name, hits in stats.items():
+        red_hits = hits["red"]
+        if not red_hits:
+            continue
+        blue_hits = hits["blue"]
+        total_hits = hits["total"]
+        rows.append(
+            {
+                "方法": name,
+                "回测期数": len(red_hits),
+                "平均红球命中": round(float(np.mean(red_hits)), 3),
+                "蓝球命中率": round(float(np.mean(blue_hits)), 3),
+                "红球>=3命中率": round(float(np.mean([h >= 3 for h in red_hits])), 3),
+                "平均总命中": round(float(np.mean(total_hits)), 3),
+                "最高红球命中": int(max(red_hits)),
+                "最高总命中": int(max(total_hits)),
+            }
+        )
+    return pd.DataFrame(rows).sort_values("平均总命中", ascending=False).reset_index(drop=True)
+
+
+@st.cache_data(show_spinner=False)
+def run_dlt_backtest(df: pd.DataFrame, backtest_periods: int, train_window: int) -> pd.DataFrame:
+    # 大乐透回测统计
+    df_sorted = df.sort_values("issue", ascending=False).reset_index(drop=True)
+    max_periods = len(df_sorted) - train_window - 1
+    periods = min(int(backtest_periods), int(max_periods))
+    if periods <= 0:
+        return pd.DataFrame()
+
+    stats: Dict[str, Dict[str, List[int]]] = {}
+    method_names: List[str] | None = None
+
+    for idx in range(periods):
+        train = df_sorted.iloc[idx + 1 : idx + 1 + train_window]
+        if train.empty:
+            continue
+        train_num = to_numeric_dlt_df(train)
+        if train_num.empty:
+            continue
+
+        base_seed = get_base_seed_from_row(train.iloc[0])
+        recency_front = compute_recency_scores(train_num, range(1, 36), DLT_FRONT_COLS, half_life=60)
+        recency_back = compute_recency_scores(train_num, range(1, 13), DLT_BACK_COLS, half_life=40)
+        dlt_stats = compute_dlt_front_stats(train_num)
+        method_results = build_dlt_method_results(
+            train_num, train_num.iloc[0], recency_front, recency_back, dlt_stats, base_seed
+        )
+
+        if method_names is None:
+            method_names = [item["name"] for item in method_results] + ["综合推荐(等权)"]
+            stats = {name: {"front": [], "back": [], "total": []} for name in method_names}
+
+        target = df_sorted.iloc[idx]
+        if target[DLT_FRONT_COLS].isna().any() or target[DLT_BACK_COLS].isna().any():
+            continue
+        actual_fronts = {int(target[col]) for col in DLT_FRONT_COLS}
+        actual_backs = {int(target[col]) for col in DLT_BACK_COLS}
+
+        for item in method_results:
+            fronts = {int(n) for n in item["fronts"]}
+            backs = {int(n) for n in item["backs"]}
+            front_hit = len(fronts & actual_fronts)
+            back_hit = len(backs & actual_backs)
+            stats[item["name"]]["front"].append(front_hit)
+            stats[item["name"]]["back"].append(back_hit)
+            stats[item["name"]]["total"].append(front_hit + back_hit)
+
+        rng_reco = random.Random(base_seed + 97)
+        ens_fronts, ens_backs = build_dlt_ensemble(
+            method_results,
+            recency_front,
+            recency_back,
+            dlt_stats["bucket_target"],
+            rng_reco,
+        )
+        ens_front_hit = len(set(ens_fronts) & actual_fronts)
+        ens_back_hit = len(set(ens_backs) & actual_backs)
+        stats["综合推荐(等权)"]["front"].append(ens_front_hit)
+        stats["综合推荐(等权)"]["back"].append(ens_back_hit)
+        stats["综合推荐(等权)"]["total"].append(ens_front_hit + ens_back_hit)
+
+    if not stats:
+        return pd.DataFrame()
+
+    rows: List[Dict[str, object]] = []
+    for name, hits in stats.items():
+        front_hits = hits["front"]
+        if not front_hits:
+            continue
+        back_hits = hits["back"]
+        total_hits = hits["total"]
+        rows.append(
+            {
+                "方法": name,
+                "回测期数": len(front_hits),
+                "平均前区命中": round(float(np.mean(front_hits)), 3),
+                "平均后区命中": round(float(np.mean(back_hits)), 3),
+                "前区>=3命中率": round(float(np.mean([h >= 3 for h in front_hits])), 3),
+                "后区全中率": round(float(np.mean([h == 2 for h in back_hits])), 3),
+                "平均总命中": round(float(np.mean(total_hits)), 3),
+                "最高前区命中": int(max(front_hits)),
+                "最高总命中": int(max(total_hits)),
+            }
+        )
+    return pd.DataFrame(rows).sort_values("平均总命中", ascending=False).reset_index(drop=True)
+
+
+@st.cache_data(show_spinner=False)
+def run_sd_backtest(df: pd.DataFrame, backtest_periods: int, train_window: int) -> pd.DataFrame:
+    # 福彩3D 回测统计
+    df_sorted = df.sort_values("issue", ascending=False).reset_index(drop=True)
+    max_periods = len(df_sorted) - train_window - 1
+    periods = min(int(backtest_periods), int(max_periods))
+    if periods <= 0:
+        return pd.DataFrame()
+
+    stats: Dict[str, Dict[str, List[int]]] = {}
+    method_names: List[str] | None = None
+
+    for idx in range(periods):
+        train = df_sorted.iloc[idx + 1 : idx + 1 + train_window]
+        if train.empty:
+            continue
+        train_num = to_numeric_sd_df(train)
+        if train_num.empty:
+            continue
+
+        base_seed = get_base_seed_from_row(train.iloc[0])
+        sd_stats = compute_sd_stats(train_num)
+        sd_recency_scores = compute_sd_recency_scores(train_num, half_life=60)
+        method_results = build_sd_method_results(train_num, sd_stats, sd_recency_scores, base_seed)
+
+        if method_names is None:
+            method_names = [item["name"] for item in method_results] + ["综合推荐(等权)"]
+            stats = {name: {"hit": []} for name in method_names}
+
+        target = df_sorted.iloc[idx]
+        if target[SD_DIGIT_COLS].isna().any():
+            continue
+        actual_digits = [int(target[col]) for col in SD_DIGIT_COLS]
+
+        for item in method_results:
+            digits = [int(d) for d in item["digits"]]
+            hit = sum(
+                1 for pos, val in enumerate(digits) if pos < len(actual_digits) and val == actual_digits[pos]
+            )
+            stats[item["name"]]["hit"].append(hit)
+
+        rng_reco = random.Random(base_seed + 79)
+        ens_digits = build_sd_ensemble(method_results, sd_recency_scores, rng_reco)
+        ens_hit = sum(
+            1 for pos, val in enumerate(ens_digits) if pos < len(actual_digits) and val == actual_digits[pos]
+        )
+        stats["综合推荐(等权)"]["hit"].append(ens_hit)
+
+    if not stats:
+        return pd.DataFrame()
+
+    rows: List[Dict[str, object]] = []
+    for name, hits in stats.items():
+        hit_list = hits["hit"]
+        if not hit_list:
+            continue
+        rows.append(
+            {
+                "方法": name,
+                "回测期数": len(hit_list),
+                "平均定位命中": round(float(np.mean(hit_list)), 3),
+                "二位及以上命中率": round(float(np.mean([h >= 2 for h in hit_list])), 3),
+                "三位全中率": round(float(np.mean([h == 3 for h in hit_list])), 3),
+                "最高定位命中": int(max(hit_list)),
+            }
+        )
+    return pd.DataFrame(rows).sort_values("平均定位命中", ascending=False).reset_index(drop=True)
+
+
 def main() -> None:
     st.set_page_config(page_title="Lottery Visual Lab", layout="wide")
 
@@ -2938,8 +3185,8 @@ def main() -> None:
         st.subheader("最新一期号码")
         render_sd_row(digits_latest, sum_latest)
 
-        tab_freq, tab_trend, tab_predict, tab_data = st.tabs(
-            ["频次分布", "趋势分析", "创意预测", "原始数据"]
+        tab_freq, tab_trend, tab_predict, tab_backtest, tab_data = st.tabs(
+            ["频次分布", "趋势分析", "创意预测", "回测分析", "原始数据"]
         )
 
         with tab_freq:
@@ -2996,6 +3243,40 @@ def main() -> None:
                 with st.expander(item["name"], expanded=expanded):
                     st.write(item["desc"])
                     st.code(format_sd_ticket(item["digits"]))
+
+        with tab_backtest:
+            st.markdown("**回测分析统计**")
+            min_train = 30
+            min_backtest = 10
+            min_required = min_train + min_backtest + 1
+            if len(df_sd) < min_required:
+                st.warning(f"历史数据不足，回测至少需要 {min_required} 期。")
+            else:
+                max_train = len(df_sd) - min_backtest - 1
+                train_window = st.number_input(
+                    "训练窗口期数",
+                    min_value=min_train,
+                    max_value=max_train,
+                    value=min(120, max_train),
+                    step=10,
+                    key="sd_backtest_train_window",
+                )
+                max_periods = len(df_sd) - int(train_window) - 1
+                backtest_periods = st.number_input(
+                    "回测期数",
+                    min_value=min_backtest,
+                    max_value=max_periods,
+                    value=min(80, max_periods),
+                    step=10,
+                    key="sd_backtest_periods",
+                )
+                with st.spinner("正在回测统计..."):
+                    backtest_df = run_sd_backtest(df_sd, int(backtest_periods), int(train_window))
+                if backtest_df.empty:
+                    st.info("回测结果为空，请检查数据的完整性。")
+                else:
+                    st.dataframe(backtest_df, use_container_width=True, height=420)
+                st.caption("说明：回测使用滚动窗口模拟，命中率为 0-1 比例。")
 
         with tab_data:
             st.markdown("**最近数据预览**")
@@ -3081,8 +3362,8 @@ def main() -> None:
         st.subheader("最新一期号码")
         render_dlt_row(front_latest, back_latest)
 
-        tab_freq, tab_trend, tab_structure, tab_predict, tab_data = st.tabs(
-            ["频次分布", "号码走势", "结构趋势", "创意预测", "原始数据"]
+        tab_freq, tab_trend, tab_structure, tab_predict, tab_backtest, tab_data = st.tabs(
+            ["频次分布", "号码走势", "结构趋势", "创意预测", "回测分析", "原始数据"]
         )
 
         with tab_freq:
@@ -3162,6 +3443,40 @@ def main() -> None:
                     st.write(item["desc"])
                     st.code(format_dlt_ticket(item["fronts"], item["backs"]))
 
+        with tab_backtest:
+            st.markdown("**回测分析统计**")
+            min_train = 30
+            min_backtest = 10
+            min_required = min_train + min_backtest + 1
+            if len(df_dlt) < min_required:
+                st.warning(f"历史数据不足，回测至少需要 {min_required} 期。")
+            else:
+                max_train = len(df_dlt) - min_backtest - 1
+                train_window = st.number_input(
+                    "训练窗口期数",
+                    min_value=min_train,
+                    max_value=max_train,
+                    value=min(120, max_train),
+                    step=10,
+                    key="dlt_backtest_train_window",
+                )
+                max_periods = len(df_dlt) - int(train_window) - 1
+                backtest_periods = st.number_input(
+                    "回测期数",
+                    min_value=min_backtest,
+                    max_value=max_periods,
+                    value=min(80, max_periods),
+                    step=10,
+                    key="dlt_backtest_periods",
+                )
+                with st.spinner("正在回测统计..."):
+                    backtest_df = run_dlt_backtest(df_dlt, int(backtest_periods), int(train_window))
+                if backtest_df.empty:
+                    st.info("回测结果为空，请检查数据的完整性。")
+                else:
+                    st.dataframe(backtest_df, use_container_width=True, height=420)
+                st.caption("说明：回测使用滚动窗口模拟，命中率为 0-1 比例。")
+
         with tab_data:
             st.markdown("**最近数据预览**")
             st.dataframe(df_dlt_recent, use_container_width=True, height=420)
@@ -3235,8 +3550,8 @@ def main() -> None:
     st.subheader("最新一期号码")
     render_ball_row(red_latest, blue_latest)
 
-    tab_freq, tab_trend, tab_structure, tab_predict, tab_data = st.tabs(
-        ["频次分布", "号码走势", "结构趋势", "创意预测", "原始数据"]
+    tab_freq, tab_trend, tab_structure, tab_predict, tab_backtest, tab_data = st.tabs(
+        ["频次分布", "号码走势", "结构趋势", "创意预测", "回测分析", "原始数据"]
     )
 
     with tab_freq:
@@ -3306,6 +3621,40 @@ def main() -> None:
             with st.expander(item["name"], expanded=expanded):
                 st.write(item["desc"])
                 st.code(format_ticket(item["reds"], int(item["blue"])))
+
+    with tab_backtest:
+        st.markdown("**回测分析统计**")
+        min_train = 30
+        min_backtest = 10
+        min_required = min_train + min_backtest + 1
+        if len(df) < min_required:
+            st.warning(f"历史数据不足，回测至少需要 {min_required} 期。")
+        else:
+            max_train = len(df) - min_backtest - 1
+            train_window = st.number_input(
+                "训练窗口期数",
+                min_value=min_train,
+                max_value=max_train,
+                value=min(120, max_train),
+                step=10,
+                key="ssq_backtest_train_window",
+            )
+            max_periods = len(df) - int(train_window) - 1
+            backtest_periods = st.number_input(
+                "回测期数",
+                min_value=min_backtest,
+                max_value=max_periods,
+                value=min(80, max_periods),
+                step=10,
+                key="ssq_backtest_periods",
+            )
+            with st.spinner("正在回测统计..."):
+                backtest_df = run_ssq_backtest(df, int(backtest_periods), int(train_window))
+            if backtest_df.empty:
+                st.info("回测结果为空，请检查数据的完整性。")
+            else:
+                st.dataframe(backtest_df, use_container_width=True, height=420)
+            st.caption("说明：回测使用滚动窗口模拟，命中率为 0-1 比例。")
 
     with tab_data:
         st.markdown("**最近数据预览**")
