@@ -48,6 +48,32 @@ SD_DIGIT_COLS = ["d1", "d2", "d3"]
 SD_SUM_COL = "sum"
 DLT_FRONT_COLS = ["front_1", "front_2", "front_3", "front_4", "front_5"]
 DLT_BACK_COLS = ["back_1", "back_2"]
+PLOT_AXIS_LABEL_SIZE = 20
+PLOT_TICK_LABEL_SIZE = 18
+PLOT_LEGEND_SIZE = 14
+PLOT_LINE_WIDTH = 3
+PLOT_MARKER_SIZE = 6
+MARKOV_DEFAULT_WINDOW = 120
+MARKOV_DEFAULT_SMOOTH = 1.0
+MARKOV_DEFAULT_TOP_N = 10
+
+
+def sanitize_filename_fragment(text: str) -> str:
+    # 清洗文件名片段，避免生成的图片名包含非法字符
+    safe_chars = []
+    for char in str(text):
+        if char.isalnum() or char in {"_", "-"}:
+            safe_chars.append(char)
+        else:
+            safe_chars.append("_")
+    return "".join(safe_chars).strip("_") or "lottery"
+
+
+def set_plot_context(source_name: str) -> None:
+    # 设置当前绘图上下文，用于统一图片命名
+    source_stem = sanitize_filename_fragment(Path(source_name).stem)
+    st.session_state["plot_source_name"] = source_stem
+    st.session_state["plot_timestamp"] = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
 def normalize_numeric_str(series: pd.Series, width: int) -> pd.Series:
@@ -118,13 +144,29 @@ def to_numeric_dlt_df(df: pd.DataFrame) -> pd.DataFrame:
 def setup_plot_style() -> None:
     # 绘图统一字体与符号设置
     plt.rcParams["font.family"] = "Times New Roman"
+    plt.rcParams["axes.labelsize"] = PLOT_AXIS_LABEL_SIZE
+    plt.rcParams["axes.labelweight"] = "bold"
+    plt.rcParams["axes.titlesize"] = 22
+    plt.rcParams["axes.titleweight"] = "bold"
     plt.rcParams["axes.unicode_minus"] = False
+    plt.rcParams["xtick.labelsize"] = PLOT_TICK_LABEL_SIZE
+    plt.rcParams["ytick.labelsize"] = PLOT_TICK_LABEL_SIZE
+    plt.rcParams["xtick.direction"] = "in"
+    plt.rcParams["ytick.direction"] = "in"
+    plt.rcParams["xtick.top"] = False
+    plt.rcParams["ytick.right"] = False
+    plt.rcParams["legend.fontsize"] = PLOT_LEGEND_SIZE
+    plt.rcParams["lines.linewidth"] = PLOT_LINE_WIDTH
+    plt.rcParams["lines.markersize"] = PLOT_MARKER_SIZE
 
 
 def save_and_show(fig: plt.Figure, name: str) -> Path:
     # 保存图像并返回路径
     PLOT_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = PLOT_DIR / f"{name}.jpg"
+    source_name = st.session_state.get("plot_source_name", "lottery")
+    timestamp = st.session_state.get("plot_timestamp", datetime.now().strftime("%Y%m%d_%H%M%S"))
+    safe_name = sanitize_filename_fragment(name)
+    output_path = PLOT_DIR / f"{source_name}_{safe_name}_{timestamp}.jpg"
     fig.savefig(output_path, dpi=300, bbox_inches="tight")
     st.pyplot(fig, use_container_width=True)
     plt.close(fig)
@@ -718,6 +760,17 @@ def pick_top_by_bucket_target(
         candidates.sort(key=lambda n: scores.get(n, 0.0), reverse=True)
         selected.extend(candidates[:count])
     return selected
+
+
+def pick_top_by_bucket_target_deterministic(
+    scores: Dict[int, float], buckets: List[List[int]], target_counts: List[int]
+) -> List[int]:
+    # 按区间目标数量稳定选取高分号码，避免额外随机扰动
+    selected: List[int] = []
+    for bucket, count in zip(buckets, target_counts):
+        ranked = sorted(bucket, key=lambda n: (-scores.get(n, 0.0), n))
+        selected.extend(ranked[:count])
+    return sorted(selected)
 
 
 def sample_dlt_front_numbers(rng: random.Random, weights: Dict[int, float] | None = None) -> List[int]:
@@ -1589,6 +1642,477 @@ def compute_markov_scores(
         leave = counts[n][prev_state][0] + 1
         scores[n] = stay / (stay + leave)
     return scores
+
+
+def compute_markov_transition_frame(
+    df_num: pd.DataFrame,
+    numbers: Iterable[int],
+    cols: List[str],
+    smooth: float = 1.0,
+) -> pd.DataFrame:
+    # 生成集合型号码的一阶马尔科夫转移明细表
+    draws: List[set[int]] = []
+    for row in df_num[cols].itertuples(index=False):
+        draws.append({int(v) for v in row if not pd.isna(v)})
+    if len(draws) < 2:
+        return pd.DataFrame(
+            columns=[
+                "number",
+                "latest_state",
+                "prev_0_next_0",
+                "prev_0_next_1",
+                "prev_1_next_0",
+                "prev_1_next_1",
+                "appear_probability",
+            ]
+        )
+
+    draws = list(reversed(draws))
+    counts = {n: [[0, 0], [0, 0]] for n in numbers}
+    for idx in range(len(draws) - 1):
+        prev_set = draws[idx]
+        next_set = draws[idx + 1]
+        for n in numbers:
+            prev_state = 1 if n in prev_set else 0
+            next_state = 1 if n in next_set else 0
+            counts[n][prev_state][next_state] += 1
+
+    latest_set = draws[-1]
+    rows: List[Dict[str, float | int | str]] = []
+    for n in numbers:
+        latest_state = 1 if n in latest_set else 0
+        prev_next = counts[n][latest_state]
+        total = prev_next[0] + prev_next[1] + 2.0 * smooth
+        appear_probability = (prev_next[1] + smooth) / total if total > 0 else 0.0
+        rows.append(
+            {
+                "number": int(n),
+                "latest_state": "Hit" if latest_state == 1 else "Miss",
+                "prev_0_next_0": counts[n][0][0],
+                "prev_0_next_1": counts[n][0][1],
+                "prev_1_next_0": counts[n][1][0],
+                "prev_1_next_1": counts[n][1][1],
+                "appear_probability": float(appear_probability),
+            }
+        )
+
+    return pd.DataFrame(rows).sort_values(
+        ["appear_probability", "number"], ascending=[False, True]
+    ).reset_index(drop=True)
+
+
+def compute_digit_markov_transition_frame(series: pd.Series, smooth: float = 1.0) -> pd.DataFrame:
+    # 生成单个位置数字的一阶马尔科夫转移明细表
+    values = series.dropna().astype(int).iloc[::-1].reset_index(drop=True)
+    if len(values) < 2:
+        return pd.DataFrame(
+            columns=["digit", "last_digit", "transition_count", "appear_probability"]
+        )
+
+    trans = {i: {j: 0 for j in range(10)} for i in range(10)}
+    for prev, nxt in zip(values[:-1], values[1:]):
+        trans[int(prev)][int(nxt)] += 1
+    last_digit = int(values.iloc[-1])
+
+    rows: List[Dict[str, float | int]] = []
+    total = sum(trans[last_digit].values()) + 10.0 * smooth
+    for digit in range(10):
+        probability = (trans[last_digit][digit] + smooth) / total if total > 0 else 0.0
+        rows.append(
+            {
+                "digit": digit,
+                "last_digit": last_digit,
+                "transition_count": trans[last_digit][digit],
+                "appear_probability": float(probability),
+            }
+        )
+
+    return pd.DataFrame(rows).sort_values(
+        ["appear_probability", "digit"], ascending=[False, True]
+    ).reset_index(drop=True)
+
+
+def build_ssq_markov_analysis(
+    df_num: pd.DataFrame,
+    analysis_window: int,
+    smooth: float,
+    top_n: int,
+) -> Dict[str, object]:
+    # 生成双色球马尔科夫专项分析结果
+    window_df = df_num.head(min(int(analysis_window), len(df_num))).copy()
+    red_frame = compute_markov_transition_frame(window_df, range(1, 34), RED_COLS, smooth)
+    blue_frame = compute_markov_transition_frame(window_df, range(1, 17), [BLUE_COL], smooth)
+
+    red_scores = {
+        int(row["number"]): float(row["appear_probability"]) for _, row in red_frame.iterrows()
+    }
+    blue_scores = {
+        int(row["number"]): float(row["appear_probability"]) for _, row in blue_frame.iterrows()
+    }
+    buckets = [list(range(1, 12)), list(range(12, 23)), list(range(23, 34))]
+    recommended_reds = pick_top_by_bucket_target_deterministic(red_scores, buckets, [2, 2, 2])
+    recommended_blue = min(
+        blue_scores,
+        key=lambda n: (-blue_scores.get(n, 0.0), n),
+    )
+
+    return {
+        "window_df": window_df,
+        "red_frame": red_frame,
+        "blue_frame": blue_frame,
+        "recommended_reds": recommended_reds,
+        "recommended_blue": int(recommended_blue),
+        "top_n": int(top_n),
+    }
+
+
+def build_dlt_markov_analysis(
+    df_num: pd.DataFrame,
+    analysis_window: int,
+    smooth: float,
+    top_n: int,
+) -> Dict[str, object]:
+    # 生成大乐透马尔科夫专项分析结果
+    window_df = df_num.head(min(int(analysis_window), len(df_num))).copy()
+    front_frame = compute_markov_transition_frame(
+        window_df, range(1, 36), DLT_FRONT_COLS, smooth
+    )
+    back_frame = compute_markov_transition_frame(window_df, range(1, 13), DLT_BACK_COLS, smooth)
+
+    front_scores = {
+        int(row["number"]): float(row["appear_probability"]) for _, row in front_frame.iterrows()
+    }
+    back_scores = {
+        int(row["number"]): float(row["appear_probability"]) for _, row in back_frame.iterrows()
+    }
+    buckets = [list(range(1, 13)), list(range(13, 25)), list(range(25, 36))]
+    recommended_fronts = pick_top_by_bucket_target_deterministic(front_scores, buckets, [2, 2, 1])
+    ranked_backs = sorted(back_scores, key=lambda n: (-back_scores.get(n, 0.0), n))
+    recommended_backs = sorted(ranked_backs[:2])
+
+    return {
+        "window_df": window_df,
+        "front_frame": front_frame,
+        "back_frame": back_frame,
+        "recommended_fronts": recommended_fronts,
+        "recommended_backs": recommended_backs,
+        "top_n": int(top_n),
+    }
+
+
+def build_sd_markov_analysis(
+    df_num: pd.DataFrame,
+    analysis_window: int,
+    smooth: float,
+    top_n: int,
+) -> Dict[str, object]:
+    # 生成福彩3D马尔科夫专项分析结果
+    window_df = df_num.head(min(int(analysis_window), len(df_num))).copy()
+    position_frames: Dict[str, pd.DataFrame] = {}
+    recommended_digits: List[int] = []
+
+    for col in SD_DIGIT_COLS:
+        frame = compute_digit_markov_transition_frame(window_df[col], smooth)
+        position_frames[col] = frame
+        if frame.empty:
+            recommended_digits.append(0)
+        else:
+            recommended_digits.append(int(frame.iloc[0]["digit"]))
+
+    return {
+        "window_df": window_df,
+        "position_frames": position_frames,
+        "recommended_digits": recommended_digits,
+        "top_n": int(top_n),
+    }
+
+
+def plot_markov_probability_bar(
+    prob_df: pd.DataFrame,
+    x_col: str,
+    y_col: str,
+    title: str,
+    color: str,
+    name: str,
+    top_n: int,
+    label_width: int = 2,
+) -> Path:
+    # 绘制马尔科夫概率排序柱状图
+    setup_plot_style()
+    plot_df = prob_df.head(top_n).copy()
+    labels = [f"{int(val):0{label_width}d}" for val in plot_df[x_col]]
+    values = plot_df[y_col].astype(float).to_numpy()
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.bar(labels, values, color=color, edgecolor="black", linewidth=0.8)
+    ax.set_title(title)
+    ax.set_xlabel("Number")
+    ax.set_ylabel("Probability")
+    ax.grid(axis="y", alpha=0.25)
+    return save_and_show(fig, name)
+
+
+def format_set_markov_frame(frame: pd.DataFrame, number_width: int, top_n: int) -> pd.DataFrame:
+    # 格式化集合型号码马尔科夫结果表
+    display_df = frame.head(top_n).copy()
+    if display_df.empty:
+        return display_df
+    display_df["number"] = display_df["number"].astype(int).map(
+        lambda val: f"{int(val):0{number_width}d}"
+    )
+    display_df["appear_probability"] = display_df["appear_probability"].map(lambda val: f"{val:.2%}")
+    return display_df.rename(
+        columns={
+            "number": "Number",
+            "latest_state": "Latest State",
+            "prev_0_next_0": "0→0",
+            "prev_0_next_1": "0→1",
+            "prev_1_next_0": "1→0",
+            "prev_1_next_1": "1→1",
+            "appear_probability": "Next Probability",
+        }
+    )
+
+
+def format_digit_markov_frame(frame: pd.DataFrame, top_n: int) -> pd.DataFrame:
+    # 格式化福彩3D位置马尔科夫结果表
+    display_df = frame.head(top_n).copy()
+    if display_df.empty:
+        return display_df
+    display_df["digit"] = display_df["digit"].astype(int).map(lambda val: f"{val:d}")
+    display_df["last_digit"] = display_df["last_digit"].astype(int).map(lambda val: f"{val:d}")
+    display_df["appear_probability"] = display_df["appear_probability"].map(lambda val: f"{val:.2%}")
+    return display_df.rename(
+        columns={
+            "digit": "Digit",
+            "last_digit": "Last Digit",
+            "transition_count": "Transition Count",
+            "appear_probability": "Next Probability",
+        }
+    )
+
+
+def render_ssq_markov_tab(df_num: pd.DataFrame) -> None:
+    # 渲染双色球马尔科夫专项分析页
+    st.markdown("**马尔科夫预测专项分析**")
+    max_window = max(2, len(df_num))
+    control_cols = st.columns(3)
+    analysis_window = control_cols[0].number_input(
+        "马尔科夫分析期数",
+        min_value=2,
+        max_value=max_window,
+        value=min(MARKOV_DEFAULT_WINDOW, max_window),
+        step=10,
+        key="ssq_markov_window",
+    )
+    smooth = control_cols[1].number_input(
+        "平滑系数",
+        min_value=0.1,
+        max_value=5.0,
+        value=float(MARKOV_DEFAULT_SMOOTH),
+        step=0.1,
+        key="ssq_markov_smooth",
+    )
+    top_n = control_cols[2].slider(
+        "概率展示 Top N",
+        min_value=3,
+        max_value=16,
+        value=min(MARKOV_DEFAULT_TOP_N, 16),
+        key="ssq_markov_top_n",
+    )
+
+    analysis = build_ssq_markov_analysis(df_num, int(analysis_window), float(smooth), int(top_n))
+    recommended_reds = analysis["recommended_reds"]
+    recommended_blue = analysis["recommended_blue"]
+    red_frame = analysis["red_frame"]
+    blue_frame = analysis["blue_frame"]
+
+    if red_frame.empty or blue_frame.empty:
+        st.warning("历史期数不足，至少需要 2 期数据才能进行马尔科夫转移分析。")
+        return
+
+    st.markdown("**马尔科夫推荐号码**")
+    render_ball_row([f"{n:02d}" for n in recommended_reds], f"{recommended_blue:02d}")
+    st.code(format_ticket(recommended_reds, recommended_blue))
+    st.caption("说明：基于上一期命中/未命中状态的一阶转移概率进行排序与筛选。")
+
+    path_red = plot_markov_probability_bar(
+        red_frame,
+        "number",
+        "appear_probability",
+        "SSQ Markov Red Probability Ranking",
+        "#c0392b",
+        "ssq_markov_red_probability",
+        int(top_n),
+        label_width=2,
+    )
+    path_blue = plot_markov_probability_bar(
+        blue_frame,
+        "number",
+        "appear_probability",
+        "SSQ Markov Blue Probability Ranking",
+        "#2980b9",
+        "ssq_markov_blue_probability",
+        min(int(top_n), 16),
+        label_width=2,
+    )
+    st.caption(f"图片已保存：{path_red}")
+    st.caption(f"图片已保存：{path_blue}")
+
+    table_cols = st.columns(2)
+    with table_cols[0]:
+        st.markdown("**红球转移概率表**")
+        st.dataframe(format_set_markov_frame(red_frame, 2, int(top_n)), use_container_width=True)
+    with table_cols[1]:
+        st.markdown("**蓝球转移概率表**")
+        st.dataframe(
+            format_set_markov_frame(blue_frame, 2, min(int(top_n), 16)),
+            use_container_width=True,
+        )
+
+
+def render_dlt_markov_tab(df_num: pd.DataFrame) -> None:
+    # 渲染大乐透马尔科夫专项分析页
+    st.markdown("**马尔科夫预测专项分析**")
+    max_window = max(2, len(df_num))
+    control_cols = st.columns(3)
+    analysis_window = control_cols[0].number_input(
+        "马尔科夫分析期数",
+        min_value=2,
+        max_value=max_window,
+        value=min(MARKOV_DEFAULT_WINDOW, max_window),
+        step=10,
+        key="dlt_markov_window",
+    )
+    smooth = control_cols[1].number_input(
+        "平滑系数",
+        min_value=0.1,
+        max_value=5.0,
+        value=float(MARKOV_DEFAULT_SMOOTH),
+        step=0.1,
+        key="dlt_markov_smooth",
+    )
+    top_n = control_cols[2].slider(
+        "概率展示 Top N",
+        min_value=3,
+        max_value=12,
+        value=min(MARKOV_DEFAULT_TOP_N, 12),
+        key="dlt_markov_top_n",
+    )
+
+    analysis = build_dlt_markov_analysis(df_num, int(analysis_window), float(smooth), int(top_n))
+    recommended_fronts = analysis["recommended_fronts"]
+    recommended_backs = analysis["recommended_backs"]
+    front_frame = analysis["front_frame"]
+    back_frame = analysis["back_frame"]
+
+    if front_frame.empty or back_frame.empty:
+        st.warning("历史期数不足，至少需要 2 期数据才能进行马尔科夫转移分析。")
+        return
+
+    st.markdown("**马尔科夫推荐号码**")
+    render_dlt_row([f"{n:02d}" for n in recommended_fronts], [f"{n:02d}" for n in recommended_backs])
+    st.code(format_dlt_ticket(recommended_fronts, recommended_backs))
+    st.caption("说明：前区按分区高概率稳定筛选，后区按转移概率排序选取。")
+
+    path_front = plot_markov_probability_bar(
+        front_frame,
+        "number",
+        "appear_probability",
+        "DLT Markov Front Probability Ranking",
+        "#d35400",
+        "dlt_markov_front_probability",
+        int(top_n),
+        label_width=2,
+    )
+    path_back = plot_markov_probability_bar(
+        back_frame,
+        "number",
+        "appear_probability",
+        "DLT Markov Back Probability Ranking",
+        "#2471a3",
+        "dlt_markov_back_probability",
+        min(int(top_n), 12),
+        label_width=2,
+    )
+    st.caption(f"图片已保存：{path_front}")
+    st.caption(f"图片已保存：{path_back}")
+
+    table_cols = st.columns(2)
+    with table_cols[0]:
+        st.markdown("**前区转移概率表**")
+        st.dataframe(format_set_markov_frame(front_frame, 2, int(top_n)), use_container_width=True)
+    with table_cols[1]:
+        st.markdown("**后区转移概率表**")
+        st.dataframe(
+            format_set_markov_frame(back_frame, 2, min(int(top_n), 12)),
+            use_container_width=True,
+        )
+
+
+def render_sd_markov_tab(df_num: pd.DataFrame) -> None:
+    # 渲染福彩3D马尔科夫专项分析页
+    st.markdown("**马尔科夫预测专项分析**")
+    max_window = max(2, len(df_num))
+    control_cols = st.columns(3)
+    analysis_window = control_cols[0].number_input(
+        "马尔科夫分析期数",
+        min_value=2,
+        max_value=max_window,
+        value=min(MARKOV_DEFAULT_WINDOW, max_window),
+        step=10,
+        key="sd_markov_window",
+    )
+    smooth = control_cols[1].number_input(
+        "平滑系数",
+        min_value=0.1,
+        max_value=5.0,
+        value=float(MARKOV_DEFAULT_SMOOTH),
+        step=0.1,
+        key="sd_markov_smooth",
+    )
+    top_n = control_cols[2].slider(
+        "概率展示 Top N",
+        min_value=3,
+        max_value=10,
+        value=min(MARKOV_DEFAULT_TOP_N, 10),
+        key="sd_markov_top_n",
+    )
+
+    analysis = build_sd_markov_analysis(df_num, int(analysis_window), float(smooth), int(top_n))
+    recommended_digits = analysis["recommended_digits"]
+    position_frames = analysis["position_frames"]
+
+    if any(frame.empty for frame in position_frames.values()):
+        st.warning("历史期数不足，至少需要 2 期数据才能进行马尔科夫转移分析。")
+        return
+
+    st.markdown("**马尔科夫推荐号码**")
+    render_sd_row([str(d) for d in recommended_digits], sum(recommended_digits))
+    st.code(format_sd_ticket(recommended_digits))
+    st.caption("说明：分别对百位、十位、个位建立一阶转移概率并独立选择最高概率数字。")
+
+    pos_cols = st.columns(3)
+    position_labels = {
+        SD_DIGIT_COLS[0]: ("百位", "#e67e22", "sd_markov_pos1_probability"),
+        SD_DIGIT_COLS[1]: ("十位", "#27ae60", "sd_markov_pos2_probability"),
+        SD_DIGIT_COLS[2]: ("个位", "#8e44ad", "sd_markov_pos3_probability"),
+    }
+    for idx, col in enumerate(SD_DIGIT_COLS):
+        label, color, chart_name = position_labels[col]
+        with pos_cols[idx]:
+            frame = position_frames[col]
+            path_pos = plot_markov_probability_bar(
+                frame,
+                "digit",
+                "appear_probability",
+                f"FC3D Markov {label} Probability Ranking",
+                color,
+                chart_name,
+                int(top_n),
+                label_width=1,
+            )
+            st.caption(f"{label}图片已保存：{path_pos}")
+            st.dataframe(format_digit_markov_frame(frame, int(top_n)), use_container_width=True)
 
 
 def compute_pmi_matrix(df_num: pd.DataFrame, numbers: List[int], cols: List[str]) -> Dict[int, Dict[int, float]]:
@@ -3139,6 +3663,7 @@ def main() -> None:
 
         df_sd_recent = df_sd.head(n_periods_sd).copy()
         df_sd_recent_num = to_numeric_sd_df(df_sd_recent)
+        set_plot_context(data_path.name)
 
         latest_sd = df_sd.iloc[0]
         digits_latest = [latest_sd[col] for col in SD_DIGIT_COLS]
@@ -3185,8 +3710,8 @@ def main() -> None:
         st.subheader("最新一期号码")
         render_sd_row(digits_latest, sum_latest)
 
-        tab_freq, tab_trend, tab_predict, tab_backtest, tab_data = st.tabs(
-            ["频次分布", "趋势分析", "创意预测", "回测分析", "原始数据"]
+        tab_freq, tab_trend, tab_markov, tab_predict, tab_backtest, tab_data = st.tabs(
+            ["频次分布", "趋势分析", "马尔科夫预测", "创意预测", "回测分析", "原始数据"]
         )
 
         with tab_freq:
@@ -3206,6 +3731,9 @@ def main() -> None:
             st.caption(f"图片已保存：{path_sum}")
             st.caption(f"图片已保存：{path_dist}")
             st.caption(f"图片已保存：{path_oe}")
+
+        with tab_markov:
+            render_sd_markov_tab(df_sd_recent_num)
 
         with tab_predict:
             st.markdown("**数学创意预测（仅供娱乐）**")
@@ -3299,6 +3827,7 @@ def main() -> None:
 
         df_dlt_recent = df_dlt.head(n_periods_dlt).copy()
         df_dlt_recent_num = to_numeric_dlt_df(df_dlt_recent)
+        set_plot_context(data_path.name)
 
         latest_dlt = df_dlt.iloc[0]
         front_latest = [latest_dlt[col] for col in DLT_FRONT_COLS]
@@ -3362,8 +3891,8 @@ def main() -> None:
         st.subheader("最新一期号码")
         render_dlt_row(front_latest, back_latest)
 
-        tab_freq, tab_trend, tab_structure, tab_predict, tab_backtest, tab_data = st.tabs(
-            ["频次分布", "号码走势", "结构趋势", "创意预测", "回测分析", "原始数据"]
+        tab_freq, tab_trend, tab_structure, tab_markov, tab_predict, tab_backtest, tab_data = st.tabs(
+            ["频次分布", "号码走势", "结构趋势", "马尔科夫预测", "创意预测", "回测分析", "原始数据"]
         )
 
         with tab_freq:
@@ -3391,6 +3920,9 @@ def main() -> None:
             st.caption(f"图片已保存：{path_sum}")
             st.caption(f"图片已保存：{path_span}")
             st.caption(f"图片已保存：{path_oe}")
+
+        with tab_markov:
+            render_dlt_markov_tab(df_dlt_recent_num)
 
         with tab_predict:
             st.markdown("**数学创意预测（仅供娱乐）**")
@@ -3497,6 +4029,7 @@ def main() -> None:
 
     df_recent = df.head(n_periods).copy()
     df_recent_num = to_numeric_df(df_recent)
+    set_plot_context(data_path.name)
 
     latest = df.iloc[0]
     latest_num = df_recent_num.iloc[0]
@@ -3550,8 +4083,8 @@ def main() -> None:
     st.subheader("最新一期号码")
     render_ball_row(red_latest, blue_latest)
 
-    tab_freq, tab_trend, tab_structure, tab_predict, tab_backtest, tab_data = st.tabs(
-        ["频次分布", "号码走势", "结构趋势", "创意预测", "回测分析", "原始数据"]
+    tab_freq, tab_trend, tab_structure, tab_markov, tab_predict, tab_backtest, tab_data = st.tabs(
+        ["频次分布", "号码走势", "结构趋势", "马尔科夫预测", "创意预测", "回测分析", "原始数据"]
     )
 
     with tab_freq:
@@ -3579,6 +4112,9 @@ def main() -> None:
         st.caption(f"图片已保存：{path_sum}")
         st.caption(f"图片已保存：{path_span}")
         st.caption(f"图片已保存：{path_oe}")
+
+    with tab_markov:
+        render_ssq_markov_tab(df_recent_num)
 
     with tab_predict:
         st.markdown("**数学创意预测（仅供娱乐）**")
